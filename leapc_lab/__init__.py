@@ -61,12 +61,14 @@ PLANNER_REGISTRY: dict[str, tuple[str, str, str, dict[str, Any]]] = {
         "PointMassPlannerConfig",
         {},
     ),
+    "i4b": ("leapc_lab.i4b.planner", "I4bPlanner", "I4bPlannerConfig", {}),
 }
 ExamplePlannerName = Literal[
     "cartpole",
     "chain",
     "mass_spring_damper",
     "pointmass",
+    "i4b",
 ]
 
 
