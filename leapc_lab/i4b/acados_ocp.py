@@ -185,6 +185,13 @@ def export_parametric_ocp(
     ocp.constraints.lh = np.array([0.0, 0.0, 0.0])
     ocp.constraints.uh = np.array([ACADOS_INFTY, ACADOS_INFTY, 26.0])
 
+    # Stage 0 gets no con_h constraints implicitly (acados requires an explicit
+    # con_h_expr_0); without this, the Qth power cap only holds from stage 1.
+    ocp.model.con_h_expr_0 = h_expr
+    ocp.constraints.lh_0 = ocp.constraints.lh
+    ocp.constraints.uh_0 = ocp.constraints.uh
+    ocp.constraints.idxsh_0 = np.array([0, 1])
+
     ocp.model.con_h_expr_e = h_expr[:2]  # no control at the terminal stage
     ocp.constraints.lh_e = np.array([0.0, 0.0])
     ocp.constraints.uh_e = np.array([ACADOS_INFTY, ACADOS_INFTY])

@@ -15,3 +15,6 @@ output/
 
 # Local uv source override
 uv.lock
+
+# marimo notebook session state
+notebooks/__marimo__/

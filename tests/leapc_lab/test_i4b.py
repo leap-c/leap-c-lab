@@ -1,22 +1,27 @@
 """Tests for the i4b parametric MPC planner and OCP definition."""
 
-import casadi as ca
-import numpy as np
 import pytest
-import scipy.linalg
-import torch
-from i4b.models.model_buildings import Building
-from i4b.models.model_hvac import Heatpump_AW
-from i4b_data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc
-from i4b_data.buildings.sfh_2010_2015 import sfh_2010_2015_2_kfw
-from i4b_data.buildings.sfh_2016_now import sfh_2016_now_0_soc
 
-from leapc_lab.i4b.acados_ocp import (
+pytest.importorskip("acados_template", reason="requires a local acados build")
+i4b = pytest.importorskip("i4b", reason="requires the i4b extra")
+pytest.importorskip("i4b_data", reason="requires the i4b extra")
+
+import casadi as ca  # noqa: E402
+import numpy as np  # noqa: E402
+import scipy.linalg  # noqa: E402
+import torch  # noqa: E402
+from i4b.models.model_buildings import Building  # noqa: E402
+from i4b.models.model_hvac import Heatpump_AW  # noqa: E402
+from i4b_data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc  # noqa: E402
+from i4b_data.buildings.sfh_2010_2015 import sfh_2010_2015_2_kfw  # noqa: E402
+from i4b_data.buildings.sfh_2016_now import sfh_2016_now_0_soc  # noqa: E402
+
+from leapc_lab.i4b.acados_ocp import (  # noqa: E402
     SUPPORTED_METHODS,
     calculate_discrete_dynamics,
     export_parametric_ocp,
 )
-from leapc_lab.i4b.planner import I4bPlanner, I4bPlannerConfig
+from leapc_lab.i4b.planner import I4bPlanner, I4bPlannerConfig  # noqa: E402
 
 
 def _building(params, mdot_hp=0.25, method="4R3C"):
