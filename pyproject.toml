@@ -44,7 +44,7 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 
 # i4b is not on PyPI. Pinned to the revision that ships i4b_data (gains profiles,
 # weather) inside the wheel (leap-c/i4b#1).
-i4b = { git = "https://github.com/leap-c/i4b.git", rev = "5c5b08d" }
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "549c6ba847d2b13d5a66a0f436e4c827b643634f" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"
