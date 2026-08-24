@@ -23,9 +23,9 @@ def _():
     from leapc_lab import create_planner
 
     return (
-        MPC_solver,
         Building,
         Heatpump_AW,
+        MPC_solver,
         Model_simulator,
         create_planner,
         mo,
@@ -90,7 +90,14 @@ def _(mo):
 
 
 @app.cell
-def _(Building, Heatpump_AW, Model_simulator, create_planner, np, sfh_1919_1948_0_soc):
+def _(
+    Building,
+    Heatpump_AW,
+    Model_simulator,
+    create_planner,
+    np,
+    sfh_1919_1948_0_soc,
+):
     # Generic: registered parametric planner
     planner = create_planner("i4b", building_params=sfh_1919_1948_0_soc)
 
@@ -114,11 +121,8 @@ def _(Building, Heatpump_AW, Model_simulator, create_planner, np, sfh_1919_1948_
 
     return (
         D_H,
-        NIGHT_END,
         T_SET_MAX,
         building,
-        hp,
-        np,
         planner,
         qdot_gains,
         sim,
@@ -159,6 +163,7 @@ def _(D_H, T_SET_MAX, np, planner, plt, qdot_gains, t_amb):
     u_ol_np = u_ol.detach().cpu().numpy()[0, :, 0]
 
     open_loop_fig, ax_ol = plt.subplots(3, 1, figsize=(10, 6.5), sharex=True)
+
     # Room climate
     ax_ol[0].axhspan(20.0, T_SET_MAX, color="#2ca02c", alpha=0.12, label="comfort band")
     ax_ol[0].plot(_day, x_ol_np[:, 0], color="#4477aa", lw=1.8, label="T_room")
@@ -167,11 +172,13 @@ def _(D_H, T_SET_MAX, np, planner, plt, qdot_gains, t_amb):
     ax_ol[0].legend(fontsize=8, frameon=False, loc="lower right")
     ax_ol[0].grid(alpha=0.25)
     ax_ol[0].set_title("Open-loop plan from 18:00 (24 h) — room climate")
+
     # Wall (thermal storage)
     ax_ol[1].plot(_day, x_ol_np[:, 1], color="#999999", lw=1.8, label="T_wall")
     ax_ol[1].set_ylabel("wall [°C]")
     ax_ol[1].legend(fontsize=8, frameon=False, loc="lower right")
     ax_ol[1].grid(alpha=0.25)
+
     # Hydraulics
     ax_ol[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
     ax_ol[2].step(_day[:-1], u_ol_np, where="post", color="#4477aa", lw=1.8, label="T_hp_sup (u)")
@@ -204,7 +211,17 @@ def _(mo):
 
 
 @app.cell
-def _(D_H, T_SET_MAX, building, np, planner, plt, qdot_gains, sim, t_amb, t_set_lower):
+def _(
+    D_H,
+    T_SET_MAX,
+    building,
+    np,
+    planner,
+    qdot_gains,
+    sim,
+    t_amb,
+    t_set_lower,
+):
     H_START, N_STEPS = 18.0, 48  # 18:00 -> 06:00 next day
     N = planner.cfg.n_horizon
 
@@ -224,12 +241,19 @@ def _(D_H, T_SET_MAX, building, np, planner, plt, qdot_gains, sim, t_amb, t_set_
             },
             "forecast": {
                 "T_amb": [float(t_amb(h)) for h in fc_hours],
+                "Qdot_gains": [qdot_gains for _h in fc_hours],
                 "T_set_lower": [float(t_set_lower(h)) for h in fc_hours],
             },
         }
         ctx_cl, u0_cl, x_cl, u_cl, _cost_cl = planner(obs_cl, ctx=ctx_cl)
         plans.append(
-            (fc_hours, x_cl.detach().cpu().numpy()[0], u_cl.detach().cpu().numpy()[0, :, 0])
+            (
+                fc_hours,
+                x_cl.detach().cpu().numpy()[0],
+                u_cl.detach().cpu().numpy()[0, :, 0],
+                np.asarray(obs_cl["forecast"]["T_amb"]),
+                np.asarray(obs_cl["forecast"]["Qdot_gains"]),
+            )
         )
 
         history["hour"].append(now)
@@ -245,35 +269,6 @@ def _(D_H, T_SET_MAX, building, np, planner, plt, qdot_gains, sim, t_amb, t_set_
             {"T_amb": float(t_amb(now)), "Qdot_gains": qdot_gains},
         )
         state_cl = res_cl["state"]
-
-    hours = history["hour"]
-    history_fig, ax_h = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
-    ax_h[0].step(
-        hours, history["low"], where="post", color="#2ca02c", lw=1.0, ls="--", label="T_set_lower"
-    )
-    ax_h[0].axhline(T_SET_MAX, color="#2ca02c", lw=1.0, ls="--", label="T_set_upper")
-    ax_h[0].plot(hours, history["room"], color="#242424", lw=1.5, label="T_room")
-    ax_h[0].set_ylabel("room [°C]")
-    ax_h[0].set_ylim(14, 28)
-    ax_h[0].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_h[0].grid(alpha=0.25)
-    ax_h[0].set_title("12-hour closed-loop rollout, 18:00 → 06:00 (night set-back scenario)")
-    ax_h[1].plot(hours, history["wall"], color="#999999", lw=1.5, label="T_wall")
-    ax_h[1].set_ylabel("wall [°C]")
-    ax_h[1].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_h[1].grid(alpha=0.25)
-    ax_h[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
-    ax_h[2].step(hours, history["sup"], where="post", color="#4477aa", label="T_hp_sup (u)")
-    ax_h[2].set_ylabel("supply [°C]")
-    ax_h[2].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_h[2].grid(alpha=0.25)
-    ax_h[3].plot(hours, history["amb"], color="#888888", label="T_amb")
-    ax_h[3].set_ylabel("ambient [°C]")
-    ax_h[3].set_xlabel("hours")
-    ax_h[3].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_h[3].grid(alpha=0.25)
-    history_fig.tight_layout()
-    history_fig
     return history, plans
 
 
@@ -282,12 +277,15 @@ def _(mo):
     mo.md("""
     ## What is the MPC thinking?
 
-    Drag the slider to any replan step: the **dashed** curves show the
-    plan the solver computed *at that moment* over its 24 h horizon,
-    overlaid on the realized rollout (solid). Watch how plans through
-    the night already anticipate the set-back — pre-heating is skipped
-    when the comfort bound relaxes, and recovery is timed to the 06:00
-    wake-up.
+    Drag the slider to any replan step. The shaded grey interval marks
+    the selected time and stays one-third across the plot: 12 hours of
+    realized history are on the left and the 24-hour plan is on the
+    right. Dashed curves show the plan computed at that moment; solid
+    curves show only the history available then. The lower and upper
+    green comfort constraints use the same stepped rendering.
+
+    Watch how plans through the night anticipate the set-back: pre-heating
+    is skipped when comfort relaxes, and recovery is timed to 06:00.
     """)
     return
 
@@ -301,52 +299,116 @@ def _(mo, plans):
 
 
 @app.cell
-def _(plan_slider):
-    plan_slider
-    return
+def _(D_H, T_SET_MAX, history, np, plan_slider, plans, plt, t_set_lower):
+    _fc_hours, x_pl, u_pl, amb_pl, gains_pl = plans[plan_slider.value]
+    _history_end = plan_slider.value + 1
+    _hours = np.asarray(history["hour"][:_history_end])
+    _now = _fc_hours[0]
+    _window_start, _window_end = _now - 12.0, _now + 24.0
+    _constraint_hours = np.arange(_window_start, _window_end + D_H, D_H)
+    plan_fig, ax_p = plt.subplots(5, 1, figsize=(10, 9), sharex=True)
 
-
-@app.cell
-def _(T_SET_MAX, history, plan_slider, plans, plt, t_set_lower):
-    _fc_hours, x_pl, u_pl = plans[plan_slider.value]
-    _hours = history["hour"]
-    plan_fig, ax_p = plt.subplots(3, 1, figsize=(10, 6.5), sharex=True)
     # Room: history + set-back band + active plan
+    constraint_kw = {
+        "where": "post",
+        "color": "#2ca02c",
+        "lw": 1.1,
+        "ls": "--",
+    }
     ax_p[0].step(
-        _fc_hours,
-        [float(t_set_lower(h)) for h in _fc_hours],
-        where="post",
-        color="#2ca02c",
-        lw=1.0,
-        ls="--",
+        _constraint_hours,
+        [float(t_set_lower(h)) for h in _constraint_hours],
+        **constraint_kw,
         label="T_set_lower",
     )
-    ax_p[0].axhline(T_SET_MAX, color="#2ca02c", lw=1.0, ls="--", label="T_set_upper")
-    ax_p[0].plot(_hours, history["room"], color="#242424", lw=1.5, label="T_room (realized)")
+    ax_p[0].step(
+        _constraint_hours,
+        np.full_like(_constraint_hours, T_SET_MAX),
+        **constraint_kw,
+        label="T_set_upper",
+    )
+    ax_p[0].plot(
+        _hours,
+        history["room"][:_history_end],
+        color="#242424",
+        lw=1.5,
+        label="T_room (realized)",
+    )
     ax_p[0].plot(_fc_hours, x_pl[:, 0], color="#4477aa", lw=1.8, ls="--", label="T_room (plan)")
-    ax_p[0].axvline(_fc_hours[0], color="#242424", lw=0.8, ls=":", alpha=0.6)
     ax_p[0].set_ylabel("room [°C]")
     ax_p[0].set_ylim(14, 28)
     ax_p[0].legend(fontsize=8, frameon=False, loc="upper right")
     ax_p[0].grid(alpha=0.25)
-    ax_p[0].set_title(f"Active plan at replan step {plan_slider.value} (t = {_fc_hours[0]:.2f} h)")
+    ax_p[0].set_title(f"Active plan at replan step {plan_slider.value} (t = {_now:.2f} h)")
+
     # Wall: history + active plan
-    ax_p[1].plot(_hours, history["wall"], color="#999999", lw=1.5, label="T_wall (realized)")
+    ax_p[1].plot(
+        _hours,
+        history["wall"][:_history_end],
+        color="#999999",
+        lw=1.5,
+        label="T_wall (realized)",
+    )
     ax_p[1].plot(_fc_hours, x_pl[:, 1], color="#4477aa", lw=1.8, ls="--", label="T_wall (plan)")
     ax_p[1].set_ylabel("wall [°C]")
     ax_p[1].legend(fontsize=8, frameon=False, loc="upper right")
     ax_p[1].grid(alpha=0.25)
+
     # Supply: history + active plan
     ax_p[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
     step_kw = {"where": "post", "color": "#4477aa", "lw": 1.5}
-    ax_p[2].step(_hours, history["sup"], **step_kw, label="T_hp_sup (realized)")
+    ax_p[2].step(_hours, history["sup"][:_history_end], **step_kw, label="T_hp_sup (realized)")
     ax_p[2].step(_fc_hours[:-1], u_pl, **step_kw, ls="--", label="u (plan)")
     ax_p[2].set_ylabel("supply [°C]")
-    ax_p[2].set_xlabel("hours")
     ax_p[2].legend(fontsize=8, frameon=False, loc="upper right")
     ax_p[2].grid(alpha=0.25)
-    plan_fig.tight_layout()
-    plan_fig
+
+    # Exogenous inputs: realized history + active forecasts
+    ax_p[3].plot(
+        _hours,
+        history["amb"][:_history_end],
+        color="#777777",
+        lw=1.5,
+        label="T_amb (realized)",
+    )
+    ax_p[3].plot(_fc_hours, amb_pl, color="#777777", lw=1.5, ls="--", label="T_amb (forecast)")
+    ax_p[3].set_ylabel("ambient [°C]")
+    ax_p[3].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_p[3].grid(alpha=0.25)
+    ax_p[4].step(
+        _hours,
+        np.full(_history_end, gains_pl[0]),
+        where="post",
+        color="#cc6677",
+        lw=1.5,
+        label="Qdot_gains (realized)",
+    )
+    ax_p[4].step(
+        _fc_hours,
+        gains_pl,
+        where="post",
+        color="#cc6677",
+        lw=1.5,
+        ls="--",
+        label="Qdot_gains (forecast)",
+    )
+    ax_p[4].set_ylabel("gains [W]")
+    ax_p[4].set_xlabel("hours")
+    ax_p[4].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_p[4].grid(alpha=0.25)
+
+    for _axis in ax_p:
+        _axis.axvspan(_now - D_H / 2, _now + D_H / 2, color="#888888", alpha=0.18)
+        _axis.set_xlim(_window_start, _window_end)
+        _axis.margins(x=0)
+
+    plan_fig.tight_layout(pad=0.4)
+    return (plan_fig,)
+
+
+@app.cell
+def _(mo, plan_fig, plan_slider):
+    mo.vstack([plan_slider, plan_fig], gap=0.5)
     return
 
 
@@ -361,15 +423,28 @@ def _(mo):
     exactly discretized linear dynamics). Same objective (energy × grid
     signal) and soft comfort band — remaining differences are numerical:
     integration scheme, slack-cost quadrature, solver. Construction
-    follows the usage documented in the i4b repository itself.
+    follows the usage documented in the i4b repository itself. Solve
+    latency is the median of three runs after construction; one-time
+    model and code-generation costs are excluded.
     """)
     return
 
 
 @app.cell
-def _(Building, Heatpump_AW, MPC_solver, np, planner, plt, qdot_gains, sfh_1919_1948_0_soc, t_amb):
+def _(
+    Building,
+    Heatpump_AW,
+    MPC_solver,
+    np,
+    planner,
+    plt,
+    qdot_gains,
+    sfh_1919_1948_0_soc,
+    t_amb,
+):
     import os
     import tempfile
+    from time import perf_counter
 
     n_horizon_cp = planner.cfg.n_horizon
     mpc_ref = MPC_solver(
@@ -387,14 +462,18 @@ def _(Building, Heatpump_AW, MPC_solver, np, planner, plt, qdot_gains, sfh_1919_
     # P rows: [T_amb, Qdot_gains, unused, T_set_lower, grid_signal]
     comparison_t_amb = float(t_amb(18.0))
     p_stage = np.array([comparison_t_amb, qdot_gains, 0.0, 20.0, 1.0])
+    p_horizon = np.tile(p_stage, (n_horizon_cp, 1))
     mpc_ref.update_NLP(np.full(3, 20.0))
+
+    ref_solve_times = []
     with tempfile.TemporaryDirectory() as tmpdir:  # keep ipopt.log out of the repo
         cwd = os.getcwd()
         os.chdir(tmpdir)
         try:
-            _uk_cp, _xk_cp, res_cp = mpc_ref.solve_NLP(
-                np.tile(p_stage, (n_horizon_cp, 1)), return_res=True
-            )
+            for _trial in range(3):
+                _start = perf_counter()
+                _uk_cp, _xk_cp, res_cp = mpc_ref.solve_NLP(p_horizon, return_res=True)
+                ref_solve_times.append(perf_counter() - _start)
         finally:
             os.chdir(cwd)
 
@@ -409,20 +488,29 @@ def _(Building, Heatpump_AW, MPC_solver, np, planner, plt, qdot_gains, sfh_1919_
         [sol_cp[k * chunk_cp + (d_cp + 1) * (nx_cp + ns_cp)] for k in range(n_horizon_cp)]
     )
 
-    _ctx_cp, _u0_cp, x_ours, u_ours, _cost_cp = planner(
-        {
-            "state": [20.0, 20.0, 20.0],
-            "disturbances": {"T_amb": comparison_t_amb, "Qdot_gains": qdot_gains},
-        }
-    )
+    comparison_obs = {
+        "state": [20.0, 20.0, 20.0],
+        "disturbances": {"T_amb": comparison_t_amb, "Qdot_gains": qdot_gains},
+    }
+    ours_solve_times = []
+    for _trial in range(3):
+        _start = perf_counter()
+        _ctx_cp, _u0_cp, x_ours, u_ours, _cost_cp = planner(comparison_obs)
+        ours_solve_times.append(perf_counter() - _start)
+
     x_ours_np = x_ours.detach().cpu().numpy()[0]
     u_ours_np = u_ours.detach().cpu().numpy()[0, :, 0]
     t_cp = np.arange(n_horizon_cp + 1) * 0.25
 
     droom_max = np.abs(x_ref[:, 0] - x_ours_np[:, 0]).max()
     droom_mean = np.abs(x_ref[:, 0] - x_ours_np[:, 0]).mean()
+    ref_ms = 1e3 * np.median(ref_solve_times)
+    ours_ms = 1e3 * np.median(ours_solve_times)
+    solve_speedup = ref_ms / ours_ms
 
-    cmp_fig, ax_cp = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+    cmp_fig, ax_cp = plt.subplots(
+        3, 1, figsize=(10, 7), gridspec_kw={"height_ratios": [2.0, 1.4, 1.0]}
+    )
     ax_cp[0].axhspan(20.0, 26.0, color="#2ca02c", alpha=0.12)
     ax_cp[0].plot(t_cp, x_ref[:, 0], color="#888888", lw=1.5, label="original i4b MPC (IPOPT)")
     ax_cp[0].plot(
@@ -438,7 +526,27 @@ def _(Building, Heatpump_AW, MPC_solver, np, planner, plt, qdot_gains, sfh_1919_
     ax_cp[1].step(t_cp[:-1], u_ours_np, where="post", color="#4477aa", lw=1.5, ls="--")
     ax_cp[1].set_ylabel("supply [°C]")
     ax_cp[1].set_xlabel("hours")
+    ax_cp[1].set_xlim(t_cp[0], t_cp[-1])
     ax_cp[1].grid(alpha=0.25)
+
+    timing_labels = ["original i4b IPOPT", "leap-c acados"]
+    timing_ms = [ref_ms, ours_ms]
+    timing_y = [1, 0]
+    ax_cp[2].scatter(timing_ms, timing_y, color=["#888888", "#4477aa"], s=45, zorder=3)
+    for _latency, _y in zip(timing_ms, timing_y):
+        ax_cp[2].annotate(
+            f"{_latency:.1f} ms",
+            (_latency, _y),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=8,
+        )
+    ax_cp[2].set_xscale("log")
+    ax_cp[2].set_yticks(timing_y, timing_labels)
+    ax_cp[2].set_xlabel("median solve time [ms], log scale")
+    ax_cp[2].set_title(f"Online solve latency: acados is {solve_speedup:.1f}x faster")
+    ax_cp[2].grid(axis="x", alpha=0.25)
     cmp_fig.tight_layout()
     cmp_fig
     return
