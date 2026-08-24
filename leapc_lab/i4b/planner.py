@@ -86,6 +86,14 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
     overwritten per solve and per batch element
     (see :func:`~leapc_lab.i4b.acados_ocp.calculate_discrete_dynamics`).
 
+    .. Note::
+        The ``obs`` dict consumed by :meth:`forward` is currently assembled
+        by the caller (see the i4b demo notebook). Once i4b ships a
+        dict-observation environment, register it here (``create_env("i4b")``)
+        and pass its obs through directly instead of deconstructing/state +
+        disturbance fields manually (dict spaces are planned upstream in the
+        leap-c/i4b fork).
+
     Args:
         cfg: Planner configuration.
         building_model: Optional pre-built i4b ``Building`` model.
@@ -156,12 +164,16 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
         """Solve the MPC problem.
 
         Args:
-            obs: Dict observation with the current state, disturbances and
-                setpoints, plus optional forecasts::
+            obs: Dict observation. ``"state"`` is required; all other channels
+                are optional and fall back to the defaults registered in the
+                OCP. Values may be floats, 1-D sequences, numpy arrays, or
+                torch tensors; scalars are broadcast over batch and horizon::
 
                     "state":        (B, nx) building temperatures [degC]
-                    "disturbances": {"T_amb": (B, 1), "Qdot_gains": (B, 1)}
-                    "setpoints":    {"T_set_lower": (B, 1), "T_set_upper": (B, 1)}
+                    "disturbances": {"T_amb":     ..., default 5 degC
+                                     "Qdot_gains":..., default 0 W}
+                    "setpoints":    {"T_set_lower":..., default 20 degC
+                                     "T_set_upper":..., default 26 degC}
                     "forecast":     optional per-timestep forecasts (B, N_fc)
                                     for any of the keys above, plus "price".
                                     Short forecasts are padded with their last
@@ -182,43 +194,44 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             ``(ctx, u0, x_traj, u_traj, cost)`` with ``u0`` the first supply
             temperature [degC], shape (B, 1).
         """
-        x0 = obs["state"]
+        x0 = _to_2d(obs["state"])
         batch_size = x0.shape[0]
         n_horizon = self.cfg.n_horizon
 
-        t_amb_now = obs["disturbances"]["T_amb"].detach().cpu().numpy()
-        qdot_gains_now = obs["disturbances"]["Qdot_gains"].detach().cpu().numpy()
-        t_set_lower_now = obs["setpoints"]["T_set_lower"].detach().cpu().numpy()
-        t_set_upper_now = obs["setpoints"]["T_set_upper"].detach().cpu().numpy()
-
+        disturbances = obs.get("disturbances", {})
+        setpoints = obs.get("setpoints", {})
         fc = obs.get("forecast", {})
 
-        t_amb_staged = _forecast_to_stagewise(fc.get("T_amb"), t_amb_now, n_horizon)
-        qdot_gains_staged = _forecast_to_stagewise(fc.get("Qdot_gains"), qdot_gains_now, n_horizon)
-        t_set_lower_staged = _forecast_to_stagewise(
-            fc.get("T_set_lower"), t_set_lower_now, n_horizon
-        )
-        t_set_upper_staged = _forecast_to_stagewise(
-            fc.get("T_set_upper"), t_set_upper_now, n_horizon
-        )
+        channels = {
+            "T_amb": disturbances.get("T_amb"),
+            "Qdot_gains": disturbances.get("Qdot_gains"),
+            "T_set_lower": setpoints.get("T_set_lower"),
+            "T_set_upper": setpoints.get("T_set_upper"),
+        }
+        params_dict: dict[str, Any] = {}
+        for name, current_value in channels.items():
+            current_arr = (
+                _to_2d(current_value).detach().cpu().numpy() if current_value is not None else None
+            )
+            if current_arr is not None and current_arr.shape[0] != batch_size:
+                current_arr = np.broadcast_to(current_arr, (batch_size, *current_arr.shape[1:]))
+            staged = _forecast_to_stagewise(fc.get(name), current_arr, n_horizon)
+            if staged is not None:
+                params_dict[name] = staged
 
-        # TODO: no env provides a "price" forecast yet; until then the price
-        # path amounts to a constant grid_signal == 1 (energy-only objective).
+        # TODO: no env provides a "price" forecast yet; the price path is only
+        # active when a forecast is passed explicitly.
         price_fc = fc.get("price")
         if price_fc is not None:
-            price_now = price_fc[:, :1].detach().cpu().numpy()
-        else:
-            price_now = np.full((batch_size, 1), self.cfg.pi_ref)
-        price_staged = _forecast_to_stagewise(price_fc, price_now, n_horizon)
-        grid_signal_staged = self.cfg.lam * (price_staged / self.cfg.pi_ref) + (1.0 - self.cfg.lam)
+            price_t = _to_2d(price_fc)
+            price_now = price_t[:, :1].detach().cpu().numpy()
+            if price_now.shape[0] != batch_size:
+                price_now = np.broadcast_to(price_now, (batch_size, 1))
+            price_staged = _forecast_to_stagewise(price_fc, price_now, n_horizon)
+            params_dict["grid_signal"] = self.cfg.lam * (price_staged / self.cfg.pi_ref) + (
+                1.0 - self.cfg.lam
+            )
 
-        params_dict: dict[str, Any] = {
-            "T_amb": t_amb_staged,
-            "Qdot_gains": qdot_gains_staged,
-            "T_set_lower": t_set_lower_staged,
-            "T_set_upper": t_set_upper_staged,
-            "grid_signal": grid_signal_staged,
-        }
         if params is not None:
             params_dict.update(_flatten_matrix_params(params))
 
@@ -228,21 +241,40 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
         return broadcast_default_param(self._default_param, obs)
 
 
+def _to_2d(value: Any) -> torch.Tensor:
+    """Coerce a scalar, 1-D sequence, numpy array, or tensor to a 2-D tensor.
+
+    Scalars become (1, 1), 1-D sequences become (1, n), and 2-D inputs pass
+    through. Plain values use the torch default dtype; tensors pass through.
+    """
+    t = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    if t.ndim == 0:
+        return t.reshape(1, 1)
+    if t.ndim == 1:
+        return t.unsqueeze(0)
+    return t
+
+
 def _forecast_to_stagewise(
-    forecast: torch.Tensor | None,
-    current: np.ndarray,
+    forecast: torch.Tensor | np.ndarray | None,
+    current: np.ndarray | None,
     n_horizon: int,
-) -> np.ndarray:
+) -> np.ndarray | None:
     """Reshape a per-timestep forecast to one value per MPC stage: (B, N+1, 1).
 
     Missing stages are filled with the last forecast value; without a forecast
     the constant ``current`` value is used. Longer forecasts are truncated.
+    Returns None when neither is given (the parameter's registered default
+    applies).
     """
     n_stages = n_segments("stagewise", n_horizon)
-    batch_size = current.shape[0]
     if forecast is None:
-        return np.broadcast_to(current[:, np.newaxis, :], (batch_size, n_stages, 1)).copy()
-    staged = forecast.detach().cpu().numpy()[:, :, np.newaxis]  # (B, N_fc, 1)
+        if current is None:
+            return None
+        return np.broadcast_to(current[:, np.newaxis, :], (current.shape[0], n_stages, 1)).copy()
+    staged_t = _to_2d(forecast)
+    staged = staged_t.detach().cpu().numpy()[:, :, np.newaxis]  # (B, N_fc, 1)
+    batch_size = staged.shape[0]
     if staged.shape[1] >= n_stages:
         return staged[:, :n_stages, :].copy()
     pad = np.broadcast_to(staged[:, -1:, :], (batch_size, n_stages - staged.shape[1], 1)).copy()

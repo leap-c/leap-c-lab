@@ -254,3 +254,24 @@ def test_long_horizon_solve_well_insulated_house(tmp_path):
 
     assert np.all(ctx.status == 0)
     assert 5.0 <= float(u0[0, 0]) <= 65.0
+
+
+def test_forward_accepts_plain_inputs_and_uses_ocp_defaults(tmp_path):
+    """Plain scalar/list obs normalize to the same solve as batched tensors.
+
+    The minimal obs omits the setpoints (OCP defaults 20/26 °C) and forecast
+    (constant channels), matching `_observations` exactly.
+    """
+    planner = I4bPlanner(
+        cfg=I4bPlannerConfig(building_params=sfh_1919_1948_0_soc, n_horizon=4),
+        export_directory=tmp_path,
+    )
+
+    plain = planner(
+        {"state": [20.0, 20.0, 20.0], "disturbances": {"T_amb": 5.0, "Qdot_gains": 0.0}}
+    )
+    batched = planner(_observations(1))
+
+    assert np.all(plain[0].status == 0)
+    for output_index in range(1, 5):
+        torch.testing.assert_close(plain[output_index], batched[output_index], rtol=1e-5, atol=1e-6)

@@ -42,8 +42,9 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 # Build acados first: https://docs.acados.org/
 # acados-template = { path = "/path/to/your/acados/interfaces/acados_template", editable = true }
 
-# i4b is not on PyPI. Pinned to the revision used by the i4b MPC example.
-i4b = { git = "https://github.com/leap-c/i4b.git", rev = "e557c2d" }
+# i4b is not on PyPI. Pinned to the revision that ships i4b_data (gains profiles,
+# weather) inside the wheel (leap-c/i4b#1).
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "5c5b08d" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"

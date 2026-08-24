@@ -11,9 +11,28 @@ def _():
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
-    import torch
 
-    return mo, np, plt, torch
+    # i4b physics + reference controller
+    from i4b.controller.mpc.casadi_framework import MPC_solver
+    from i4b.models.model_buildings import Building
+    from i4b.models.model_hvac import Heatpump_AW
+    from i4b.simulator import Model_simulator
+    from i4b_data.buildings import sfh_1919_1948_0_soc
+
+    # leap-c-lab registered planners
+    from leapc_lab import create_planner
+
+    return (
+        MPC_solver,
+        Building,
+        Heatpump_AW,
+        Model_simulator,
+        create_planner,
+        mo,
+        np,
+        plt,
+        sfh_1919_1948_0_soc,
+    )
 
 
 @app.cell(hide_code=True)
@@ -39,7 +58,7 @@ def _(mo):
     | `T_amb` | ambient (outside) temperature [°C], a disturbance |
     | `Qdot_gains` | internal heat gains (people, appliances) [W] |
 
-    Comfort: `T_room` should stay within 20-26 °C (violations are
+    Comfort: `T_room` should stay within the comfort band (violations are
     penalized softly). The planner is an acados OCP whose building
     dynamics are runtime parameters — one compiled solver serves any
     house of the same model class.
@@ -54,37 +73,58 @@ def _(mo):
     mo.md("""
     ## Setup
 
-    One house, one planner (compiles the acados solver once), and a small
-    helper to build observation dicts.
+    Two ways into the same stack:
+
+    1. **Generic**: `create_planner("i4b", ...)` — the registered planner,
+       one line, compiles the acados solver once.
+    2. **Explicit**: `Building` + `Heatpump_AW` + `Model_simulator` — the
+       "true" physics the MPC plans against, built by hand so the pieces
+       are visible (this mirrors what the upstream i4b docs describe).
+
+    The scenario is a cold winter day: ambient around 0 °C with a diurnal
+    cycle and 300 W of internal gains, plus a **night set-back** — the
+    comfort lower bound drops from 20 °C to 16 °C between 22:00 and
+    06:00.
     """)
     return
 
 
 @app.cell
-def _(np):
-    from i4b.models.model_buildings import Building
-    from i4b.models.model_hvac import Heatpump_AW
-    from i4b_data.buildings import sfh_1919_1948_0_soc
-    from leapc_lab.i4b.planner import I4bPlanner, I4bPlannerConfig
+def _(Building, Heatpump_AW, Model_simulator, create_planner, np, sfh_1919_1948_0_soc):
+    # Generic: registered parametric planner
+    planner = create_planner("i4b", building_params=sfh_1919_1948_0_soc)
 
+    # Explicit: the "true" house (heat pump ODEs + building ODEs)
     building = Building(params=sfh_1919_1948_0_soc, mdot_hp=0.25, method="4R3C")
-    planner = I4bPlanner(cfg=I4bPlannerConfig(building_params=sfh_1919_1948_0_soc))
-    house = {"params": sfh_1919_1948_0_soc, "model": building}
-    return Heatpump_AW, building, house, np, planner
+    hp = Heatpump_AW(mdot_HP=0.25)
+    sim = Model_simulator(hp, building, 900)
 
+    # Scenario: cold winter day with a diurnal ambient cycle...
+    D_H = 0.25  # 15 min in hours
+    t_amb = lambda h: 0.5 + 2.0 * np.sin(2 * np.pi * (h - 10.0) / 24.0)  # noqa: E731
+    qdot_gains = 300.0  # W
 
-@app.cell
-def _(torch):
-    def make_obs(state, t_amb, qdot_gains=300.0):
-        """Observation dict: current state + disturbances at one moment in time."""
-        one = lambda v: torch.tensor([[v]], dtype=torch.float32)  # noqa: E731
-        return {
-            "state": torch.tensor([state], dtype=torch.float32),
-            "disturbances": {"T_amb": one(t_amb), "Qdot_gains": one(qdot_gains)},
-            "setpoints": {"T_set_lower": one(20.0), "T_set_upper": one(26.0)},
-        }
+    # ...and night set-back of the lower comfort bound
+    T_SET_DAY, T_SET_NIGHT, T_SET_MAX = 20.0, 16.0, 26.0
+    NIGHT_START, NIGHT_END = 22.0, 30.0  # 22:00 -> 06:00 next day
 
-    return (make_obs,)
+    def t_set_lower(h):
+        clock = h % 24.0
+        return T_SET_NIGHT if clock >= NIGHT_START or clock < NIGHT_END % 24.0 else T_SET_DAY
+
+    return (
+        D_H,
+        NIGHT_END,
+        T_SET_MAX,
+        building,
+        hp,
+        np,
+        planner,
+        qdot_gains,
+        sim,
+        t_amb,
+        t_set_lower,
+    )
 
 
 @app.cell(hide_code=True)
@@ -92,44 +132,54 @@ def _(mo):
     mo.md("""
     ## Open-loop plan
 
-    A single MPC solve from a cold start (everything at 20 °C) on a cold
-    winter day (-5 °C ambient, 300 W internal gains). The plot shows the
-    full 24-hour plan: how the MPC pre-heats room and walls, and how it
-    schedules the supply temperature. Note the horizon end: with nothing
-    left to optimize beyond 24 h, the controller lets the room drift —
-    the classic receding-horizon artifact; the next re-solve fixes it.
+    A single MPC solve from a cold start (everything at 20 °C) on the
+    winter day described above. The plot shows the full 24-hour plan: how
+    the MPC pre-heats room and walls, and how it schedules the supply
+    temperature. Note the horizon end: with nothing left to optimize
+    beyond 24 h, the controller lets the room drift — the classic
+    receding-horizon artifact; the next re-solve fixes it.
+
+    Observations for the planner are plain dicts. The dict here makes
+    what's actually fed to the solver explicit.
     """)
     return
 
 
 @app.cell
-def _(make_obs, np, planner, plt):
-    _ctx_ol, _u0_ol, x_ol, u_ol, _cost_ol = planner(make_obs([20.0, 20.0, 20.0], -5.0))
+def _(D_H, T_SET_MAX, np, planner, plt, qdot_gains, t_amb):
+    _day = np.arange(planner.cfg.n_horizon + 1) * D_H
+    obs_ol = {
+        "state": [20.0, 20.0, 20.0],
+        "disturbances": {"T_amb": float(t_amb(18.0)), "Qdot_gains": qdot_gains},
+        "setpoints": {"T_set_lower": 20.0, "T_set_upper": T_SET_MAX},
+    }
+    _ctx_ol, _u0_ol, x_ol, u_ol, _cost_ol = planner(obs_ol)
 
     x_ol_np = x_ol.detach().cpu().numpy()[0]
     u_ol_np = u_ol.detach().cpu().numpy()[0, :, 0]
-    t_ol = np.arange(len(x_ol_np)) * 0.25
 
-    open_loop_fig, ax_ol = plt.subplots(2, 1, figsize=(10, 5.5), sharex=True)
+    open_loop_fig, ax_ol = plt.subplots(3, 1, figsize=(10, 6.5), sharex=True)
     # Room climate
-    ax_ol[0].axhspan(20.0, 26.0, color="#2ca02c", alpha=0.12, label="comfort band")
-    ax_ol[0].plot(t_ol, x_ol_np[:, 0], color="#4477aa", lw=1.8, label="T_room")
-    ax_ol[0].plot(t_ol, x_ol_np[:, 1], color="#999999", lw=1.0, label="T_wall")
-    ax_ol[0].set_ylabel("temperature [°C]")
+    ax_ol[0].axhspan(20.0, T_SET_MAX, color="#2ca02c", alpha=0.12, label="comfort band")
+    ax_ol[0].plot(_day, x_ol_np[:, 0], color="#4477aa", lw=1.8, label="T_room")
+    ax_ol[0].set_ylabel("room [°C]")
     ax_ol[0].set_ylim(15, 30)
     ax_ol[0].legend(fontsize=8, frameon=False, loc="lower right")
     ax_ol[0].grid(alpha=0.25)
-    ax_ol[0].set_title("Open-loop plan (24 h, -5 °C ambient) — room climate")
-
-    # Hydraulics
-    ax_ol[1].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
-    ax_ol[1].step(t_ol[:-1], u_ol_np, where="post", color="#4477aa", lw=1.8, label="T_hp_sup (u)")
-    ax_ol[1].plot(t_ol, x_ol_np[:, 2], color="#cc6677", lw=1.0, ls="--", label="T_hp_ret")
-    ax_ol[1].set_ylabel("temperature [°C]")
-    ax_ol[1].set_xlabel("hours")
+    ax_ol[0].set_title("Open-loop plan from 18:00 (24 h) — room climate")
+    # Wall (thermal storage)
+    ax_ol[1].plot(_day, x_ol_np[:, 1], color="#999999", lw=1.8, label="T_wall")
+    ax_ol[1].set_ylabel("wall [°C]")
     ax_ol[1].legend(fontsize=8, frameon=False, loc="lower right")
     ax_ol[1].grid(alpha=0.25)
-    ax_ol[1].set_title("Hydraulics — supply/return spread drives thermal power")
+    # Hydraulics
+    ax_ol[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
+    ax_ol[2].step(_day[:-1], u_ol_np, where="post", color="#4477aa", lw=1.8, label="T_hp_sup (u)")
+    ax_ol[2].plot(_day, x_ol_np[:, 2], color="#cc6677", lw=1.0, ls="--", label="T_hp_ret")
+    ax_ol[2].set_ylabel("temperature [°C]")
+    ax_ol[2].set_xlabel("hours")
+    ax_ol[2].legend(fontsize=8, frameon=False, loc="lower right")
+    ax_ol[2].grid(alpha=0.25)
     open_loop_fig.tight_layout()
     open_loop_fig
     return
@@ -140,58 +190,163 @@ def _(mo):
     mo.md("""
     ## Closed-loop rollout
 
-    In operation the MPC re-plans every 15 minutes: solve, apply only the
-    first control, advance the i4b simulator, repeat. The ambient
-    temperature follows a sinusoidal warm-up over 12 hours. The solver
-    context (`ctx`) is chained between steps for warm-starting.
+    In operation the MPC re-plans every 15 minutes: build the observation
+    (current state + disturbances + setpoints + **forecasts**), solve,
+    apply only the first control, advance the i4b simulator, repeat. The
+    solver context (`ctx`) is chained between steps for warm-starting.
+
+    The rollout starts at **18:00**: two hours in, the night set-back
+    kicks in and the lower comfort bound drops to 16 °C — the MPC sees
+    this coming in its **forecast** and lets room temperature sag
+    overnight, saving energy exactly where comfort is relaxed.
     """)
     return
 
 
 @app.cell
-def _(Heatpump_AW, building, make_obs, np, planner, plt):
-    from i4b.simulator import Model_simulator
-
-    sim_cl = Model_simulator(Heatpump_AW(mdot_HP=0.25), building, 900)
+def _(D_H, T_SET_MAX, building, np, planner, plt, qdot_gains, sim, t_amb, t_set_lower):
+    H_START, N_STEPS = 18.0, 48  # 18:00 -> 06:00 next day
+    N = planner.cfg.n_horizon
 
     state_cl = {k: 20.0 for k in building.state_keys}
-    n_steps_cl = 48
     ctx_cl = None
-    room_cl, sup_cl, amb_cl = [], [], []
-    for step in range(n_steps_cl):
-        amb_val = -5.0 + 3.0 * np.sin(step * 0.1)
-        obs_cl = make_obs([float(state_cl[k]) for k in building.state_keys], amb_val)
-        ctx_cl, u0_cl, _x_cl, _u_cl, _cost_cl = planner(obs_cl, ctx=ctx_cl)
-        action_cl = float(u0_cl[0, 0])
-        room_cl.append(state_cl["T_room"])
-        sup_cl.append(action_cl)
-        amb_cl.append(amb_val)
-        res_cl = sim_cl.get_next_state(
+    plans = []  # per-step planned trajectories for the interactive view below
+    history = {"hour": [], "room": [], "wall": [], "sup": [], "amb": [], "low": []}
+    for step in range(N_STEPS):
+        now = H_START + step * D_H
+        fc_hours = now + np.arange(N + 1) * D_H
+        obs_cl = {
+            "state": [float(state_cl[k]) for k in building.state_keys],
+            "disturbances": {"T_amb": float(t_amb(now)), "Qdot_gains": qdot_gains},
+            "setpoints": {
+                "T_set_lower": float(t_set_lower(now)),
+                "T_set_upper": T_SET_MAX,
+            },
+            "forecast": {
+                "T_amb": [float(t_amb(h)) for h in fc_hours],
+                "T_set_lower": [float(t_set_lower(h)) for h in fc_hours],
+            },
+        }
+        ctx_cl, u0_cl, x_cl, u_cl, _cost_cl = planner(obs_cl, ctx=ctx_cl)
+        plans.append(
+            (fc_hours, x_cl.detach().cpu().numpy()[0], u_cl.detach().cpu().numpy()[0, :, 0])
+        )
+
+        history["hour"].append(now)
+        history["room"].append(state_cl["T_room"])
+        history["wall"].append(state_cl["T_wall"])
+        history["sup"].append(float(u0_cl[0, 0]))
+        history["amb"].append(float(t_amb(now)))
+        history["low"].append(float(t_set_lower(now)))
+
+        res_cl = sim.get_next_state(
             state_cl,
-            action_cl,
-            {"T_amb": amb_val, "Qdot_gains": 300.0},
+            float(u0_cl[0, 0]),
+            {"T_amb": float(t_amb(now)), "Qdot_gains": qdot_gains},
         )
         state_cl = res_cl["state"]
 
-    t_cl = np.arange(n_steps_cl) * 0.25
-    closed_loop_fig, ax_cl = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
-    ax_cl[0].axhspan(20.0, 26.0, color="#2ca02c", alpha=0.12, label="comfort band")
-    ax_cl[0].plot(t_cl, room_cl, color="#242424", lw=1.5, label="T_room")
-    ax_cl[0].set_ylabel("room [°C]")
-    ax_cl[0].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_cl[0].grid(alpha=0.25)
-    ax_cl[0].set_title("12-hour closed-loop rollout")
-    ax_cl[1].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
-    ax_cl[1].step(t_cl, sup_cl, where="post", color="#4477aa", label="T_hp_sup (u)")
-    ax_cl[1].set_ylabel("supply [°C]")
-    ax_cl[1].legend(fontsize=8, frameon=False, loc="upper right")
-    ax_cl[1].grid(alpha=0.25)
-    ax_cl[2].plot(t_cl, amb_cl, color="#888888")
-    ax_cl[2].set_ylabel("ambient [°C]")
-    ax_cl[2].set_xlabel("hours")
-    ax_cl[2].grid(alpha=0.25)
-    closed_loop_fig.tight_layout()
-    closed_loop_fig
+    hours = history["hour"]
+    history_fig, ax_h = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
+    ax_h[0].step(
+        hours, history["low"], where="post", color="#2ca02c", lw=1.0, ls="--", label="T_set_lower"
+    )
+    ax_h[0].axhline(T_SET_MAX, color="#2ca02c", lw=1.0, ls="--", label="T_set_upper")
+    ax_h[0].plot(hours, history["room"], color="#242424", lw=1.5, label="T_room")
+    ax_h[0].set_ylabel("room [°C]")
+    ax_h[0].set_ylim(14, 28)
+    ax_h[0].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_h[0].grid(alpha=0.25)
+    ax_h[0].set_title("12-hour closed-loop rollout, 18:00 → 06:00 (night set-back scenario)")
+    ax_h[1].plot(hours, history["wall"], color="#999999", lw=1.5, label="T_wall")
+    ax_h[1].set_ylabel("wall [°C]")
+    ax_h[1].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_h[1].grid(alpha=0.25)
+    ax_h[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
+    ax_h[2].step(hours, history["sup"], where="post", color="#4477aa", label="T_hp_sup (u)")
+    ax_h[2].set_ylabel("supply [°C]")
+    ax_h[2].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_h[2].grid(alpha=0.25)
+    ax_h[3].plot(hours, history["amb"], color="#888888", label="T_amb")
+    ax_h[3].set_ylabel("ambient [°C]")
+    ax_h[3].set_xlabel("hours")
+    ax_h[3].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_h[3].grid(alpha=0.25)
+    history_fig.tight_layout()
+    history_fig
+    return history, plans
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## What is the MPC thinking?
+
+    Drag the slider to any replan step: the **dashed** curves show the
+    plan the solver computed *at that moment* over its 24 h horizon,
+    overlaid on the realized rollout (solid). Watch how plans through
+    the night already anticipate the set-back — pre-heating is skipped
+    when the comfort bound relaxes, and recovery is timed to the 06:00
+    wake-up.
+    """)
+    return
+
+
+@app.cell
+def _(mo, plans):
+    plan_slider = mo.ui.slider(
+        steps=range(len(plans)), value=10, label="replan step", show_value=True
+    )
+    return (plan_slider,)
+
+
+@app.cell
+def _(plan_slider):
+    plan_slider
+    return
+
+
+@app.cell
+def _(T_SET_MAX, history, plan_slider, plans, plt, t_set_lower):
+    _fc_hours, x_pl, u_pl = plans[plan_slider.value]
+    _hours = history["hour"]
+    plan_fig, ax_p = plt.subplots(3, 1, figsize=(10, 6.5), sharex=True)
+    # Room: history + set-back band + active plan
+    ax_p[0].step(
+        _fc_hours,
+        [float(t_set_lower(h)) for h in _fc_hours],
+        where="post",
+        color="#2ca02c",
+        lw=1.0,
+        ls="--",
+        label="T_set_lower",
+    )
+    ax_p[0].axhline(T_SET_MAX, color="#2ca02c", lw=1.0, ls="--", label="T_set_upper")
+    ax_p[0].plot(_hours, history["room"], color="#242424", lw=1.5, label="T_room (realized)")
+    ax_p[0].plot(_fc_hours, x_pl[:, 0], color="#4477aa", lw=1.8, ls="--", label="T_room (plan)")
+    ax_p[0].axvline(_fc_hours[0], color="#242424", lw=0.8, ls=":", alpha=0.6)
+    ax_p[0].set_ylabel("room [°C]")
+    ax_p[0].set_ylim(14, 28)
+    ax_p[0].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_p[0].grid(alpha=0.25)
+    ax_p[0].set_title(f"Active plan at replan step {plan_slider.value} (t = {_fc_hours[0]:.2f} h)")
+    # Wall: history + active plan
+    ax_p[1].plot(_hours, history["wall"], color="#999999", lw=1.5, label="T_wall (realized)")
+    ax_p[1].plot(_fc_hours, x_pl[:, 1], color="#4477aa", lw=1.8, ls="--", label="T_wall (plan)")
+    ax_p[1].set_ylabel("wall [°C]")
+    ax_p[1].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_p[1].grid(alpha=0.25)
+    # Supply: history + active plan
+    ax_p[2].axhspan(5.0, 65.0, color="#888888", alpha=0.08, label="u limits")
+    step_kw = {"where": "post", "color": "#4477aa", "lw": 1.5}
+    ax_p[2].step(_hours, history["sup"], **step_kw, label="T_hp_sup (realized)")
+    ax_p[2].step(_fc_hours[:-1], u_pl, **step_kw, ls="--", label="u (plan)")
+    ax_p[2].set_ylabel("supply [°C]")
+    ax_p[2].set_xlabel("hours")
+    ax_p[2].legend(fontsize=8, frameon=False, loc="upper right")
+    ax_p[2].grid(alpha=0.25)
+    plan_fig.tight_layout()
+    plan_fig
     return
 
 
@@ -200,31 +355,28 @@ def _(mo):
     mo.md("""
     ## Comparison with the original i4b MPC
 
-    Same open-loop scenario, this time solved with the reference
-    implementation from the i4b repo (`MPC_solver`: IPOPT interior-point
-    solver + Radau collocation on the *continuous* building dynamics),
-    overlaid with our acados port (SQP on the exactly discretized linear
-    dynamics). Both share the same objective (electrical energy weighted
-    by the grid signal) and the same soft comfort band — remaining
-    differences are numerical: integration scheme, slack-cost quadrature,
-    and the solver itself.
+    Same open-loop scenario solved with the reference implementation
+    from the i4b repo (`MPC_solver`: IPOPT + Radau collocation on the
+    continuous dynamics), overlaid with our acados port (SQP on the
+    exactly discretized linear dynamics). Same objective (energy × grid
+    signal) and soft comfort band — remaining differences are numerical:
+    integration scheme, slack-cost quadrature, solver. Construction
+    follows the usage documented in the i4b repository itself.
     """)
     return
 
 
 @app.cell
-def _(Heatpump_AW, building, make_obs, np, planner, plt):
+def _(Building, Heatpump_AW, MPC_solver, np, planner, plt, qdot_gains, sfh_1919_1948_0_soc, t_amb):
     import os
     import tempfile
-
-    from i4b.controller.mpc.casadi_framework import MPC_solver
 
     n_horizon_cp = planner.cfg.n_horizon
     mpc_ref = MPC_solver(
         ".",
         "comparison",
         Heatpump_AW(mdot_HP=0.25),
-        building,
+        Building(params=sfh_1919_1948_0_soc, mdot_hp=0.25, method="4R3C"),
         nx=3,
         ns=2,
         nc=4,
@@ -233,7 +385,8 @@ def _(Heatpump_AW, building, make_obs, np, planner, plt):
         ws=planner.cfg.ws,
     )
     # P rows: [T_amb, Qdot_gains, unused, T_set_lower, grid_signal]
-    p_stage = np.array([-5.0, 300.0, 0.0, 20.0, 1.0])
+    comparison_t_amb = float(t_amb(18.0))
+    p_stage = np.array([comparison_t_amb, qdot_gains, 0.0, 20.0, 1.0])
     mpc_ref.update_NLP(np.full(3, 20.0))
     with tempfile.TemporaryDirectory() as tmpdir:  # keep ipopt.log out of the repo
         cwd = os.getcwd()
@@ -256,7 +409,12 @@ def _(Heatpump_AW, building, make_obs, np, planner, plt):
         [sol_cp[k * chunk_cp + (d_cp + 1) * (nx_cp + ns_cp)] for k in range(n_horizon_cp)]
     )
 
-    _ctx_cp, _u0_cp, x_ours, u_ours, _cost_cp = planner(make_obs([20.0, 20.0, 20.0], -5.0))
+    _ctx_cp, _u0_cp, x_ours, u_ours, _cost_cp = planner(
+        {
+            "state": [20.0, 20.0, 20.0],
+            "disturbances": {"T_amb": comparison_t_amb, "Qdot_gains": qdot_gains},
+        }
+    )
     x_ours_np = x_ours.detach().cpu().numpy()[0]
     u_ours_np = u_ours.detach().cpu().numpy()[0, :, 0]
     t_cp = np.arange(n_horizon_cp + 1) * 0.25
@@ -273,7 +431,9 @@ def _(Heatpump_AW, building, make_obs, np, planner, plt):
     ax_cp[0].set_ylabel("room [°C]")
     ax_cp[0].legend(fontsize=8, frameon=False)
     ax_cp[0].grid(alpha=0.25)
-    ax_cp[0].set_title(f"Open-loop comparison — max ΔT_room {droom_max:.2f} K, mean {droom_mean:.3f} K")
+    ax_cp[0].set_title(
+        f"Open-loop comparison — max ΔT_room {droom_max:.2f} K, mean {droom_mean:.3f} K"
+    )
     ax_cp[1].step(t_cp[:-1], u_ref, where="post", color="#888888", lw=1.5)
     ax_cp[1].step(t_cp[:-1], u_ours_np, where="post", color="#4477aa", lw=1.5, ls="--")
     ax_cp[1].set_ylabel("supply [°C]")
