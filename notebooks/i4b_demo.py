@@ -508,9 +508,7 @@ def _(
     ours_ms = 1e3 * np.median(ours_solve_times)
     solve_speedup = ref_ms / ours_ms
 
-    cmp_fig, ax_cp = plt.subplots(
-        3, 1, figsize=(10, 7), gridspec_kw={"height_ratios": [2.0, 1.4, 1.0]}
-    )
+    cmp_fig, ax_cp = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
     ax_cp[0].axhspan(20.0, 26.0, color="#2ca02c", alpha=0.12)
     ax_cp[0].plot(t_cp, x_ref[:, 0], color="#888888", lw=1.5, label="original i4b MPC (IPOPT)")
     ax_cp[0].plot(
@@ -528,27 +526,21 @@ def _(
     ax_cp[1].set_xlabel("hours")
     ax_cp[1].set_xlim(t_cp[0], t_cp[-1])
     ax_cp[1].grid(alpha=0.25)
-
-    timing_labels = ["original i4b IPOPT", "leap-c acados"]
-    timing_ms = [ref_ms, ours_ms]
-    timing_y = [1, 0]
-    ax_cp[2].scatter(timing_ms, timing_y, color=["#888888", "#4477aa"], s=45, zorder=3)
-    for _latency, _y in zip(timing_ms, timing_y):
-        ax_cp[2].annotate(
-            f"{_latency:.1f} ms",
-            (_latency, _y),
-            xytext=(6, 0),
-            textcoords="offset points",
-            va="center",
-            fontsize=8,
-        )
-    ax_cp[2].set_xscale("log")
-    ax_cp[2].set_yticks(timing_y, timing_labels)
-    ax_cp[2].set_xlabel("median solve time [ms], log scale")
-    ax_cp[2].set_title(f"Online solve latency: acados is {solve_speedup:.1f}x faster")
-    ax_cp[2].grid(axis="x", alpha=0.25)
     cmp_fig.tight_layout()
     cmp_fig
+    return ours_ms, ref_ms, solve_speedup
+
+
+@app.cell(hide_code=True)
+def _(mo, ours_ms, ref_ms, solve_speedup):
+    mo.md(f"""
+    **Online solve latency** (median of three solves; construction excluded)
+
+    | Solver | Median solve time | Relative speed |
+    |---|---:|---:|
+    | Original i4b MPC (IPOPT) | {ref_ms:.1f} ms | 1.0x |
+    | leap-c acados | {ours_ms:.1f} ms | {solve_speedup:.1f}x faster |
+    """)
     return
 
 
