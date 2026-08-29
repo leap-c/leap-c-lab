@@ -12,7 +12,7 @@ dependencies = [
   "leap-c",
   "acados-template",
   "casadi",
-  "gymnasium==1.1.1",
+  "gymnasium>=1.1.1",
   "matplotlib",
   "numpy>=1.26.0",
   "scipy==1.15.2",
