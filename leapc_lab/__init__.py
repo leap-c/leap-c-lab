@@ -10,11 +10,24 @@ from gymnasium import Env
 from leapc_lab.controller import CtxType, ParameterizedController
 from leapc_lab.planner import ControllerFromPlanner, ParameterizedPlanner
 
-ExampleEnvName = Literal["cartpole", "cartpole_balance", "chain", "mass_spring_damper", "pointmass"]
+ExampleEnvName = Literal[
+    "cartpole", "cartpole_balance", "chain", "i4b", "mass_spring_damper", "pointmass"
+]
 ENV_REGISTRY: dict[str, tuple[str, str]] = {
     "cartpole": ("leapc_lab.cartpole.env", "CartPoleEnv"),
     "cartpole_balance": ("leapc_lab.cartpole.env", "CartPoleBalanceEnv"),
     "chain": ("leapc_lab.chain.env", "ChainEnv"),
+    # The upstream i4b RoomHeatEnv: flat-array obs (not the i4b planner's dict
+    # contract), data-driven scenarios from i4b_data. Construction requires the
+    # i4b-specific kwargs, e.g.:
+    #   create_env("i4b", hp_model="Heatpump_AW", method="4R3C", mdot_HP=0.25,
+    #              building="sfh_1919_1948_0_soc", days=1,
+    #              internal_gain_profile="i4b_data/profiles/InternalGains/"
+    #                                    "ResidentialDetached.csv")
+    # Weather resolves from the wheel for the standard Freiburg buildings
+    # (one-time PVGIS download otherwise), gains profiles are package-relative
+    # since both ship inside the i4b wheel (leap-c/i4b#1).
+    "i4b": ("i4b.gym_interface.room_env", "RoomHeatEnv"),
     "mass_spring_damper": ("leapc_lab.mass_spring_damper.env", "MassSpringDamperEnv"),
     "pointmass": ("leapc_lab.pointmass.env", "PointMassEnv"),
 }
@@ -61,12 +74,14 @@ PLANNER_REGISTRY: dict[str, tuple[str, str, str, dict[str, Any]]] = {
         "PointMassPlannerConfig",
         {},
     ),
+    "i4b": ("leapc_lab.i4b.planner", "I4bPlanner", "I4bPlannerConfig", {}),
 }
 ExamplePlannerName = Literal[
     "cartpole",
     "chain",
     "mass_spring_damper",
     "pointmass",
+    "i4b",
 ]
 
 

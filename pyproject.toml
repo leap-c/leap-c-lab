@@ -12,7 +12,7 @@ dependencies = [
   "leap-c",
   "acados-template",
   "casadi",
-  "gymnasium==1.1.1",
+  "gymnasium>=1.1.1",
   "matplotlib",
   "numpy>=1.26.0",
   "scipy==1.15.2",
@@ -21,11 +21,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "marimo>=0.24.0",
   "moviepy",
   "pygame",
   "pytest==8.4.0",
   "ruff==0.12.12",
 ]
+i4b = ["i4b", "pandas>=2.0.0"]
 
 [tool.setuptools.packages.find]
 include = ["leapc_lab*"]
@@ -39,6 +41,10 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 # acados-template is not on PyPI. Uncomment and point at your local acados checkout.
 # Build acados first: https://docs.acados.org/
 # acados-template = { path = "/path/to/your/acados/interfaces/acados_template", editable = true }
+
+# i4b is not on PyPI. Pinned to the revision that ships i4b_data (gains profiles,
+# weather) inside the wheel (leap-c/i4b#1).
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "549c6ba847d2b13d5a66a0f436e4c827b643634f" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"

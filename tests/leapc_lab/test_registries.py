@@ -38,6 +38,7 @@ class TestEnvs:
     def test_create_env__calls_constructor_correctly(self, env_name: str) -> None:
         """Tests that `create_env` calls the correct constructor for each env."""
         module_path, cls_name = ENV_REGISTRY[env_name]
+        pytest.importorskip(module_path, reason="optional example dependency not installed")
         kwargs = {"foo": object(), "bar": object()}
         with patch(f"{module_path}.{cls_name}", return_value=Mock()) as mock_cls:
             env: Mock = create_env(env_name, **kwargs)
@@ -66,6 +67,7 @@ class TestPlanners:
     def test_create_planner__calls_constructor_correctly(self, planner_name: str) -> None:
         """Tests that `create_planner` calls the correct constructor for each planner and cfg."""
         module_path, cls_name, cfg_cls_name, default_kwargs = PLANNER_REGISTRY[planner_name]
+        pytest.importorskip(module_path, reason="optional example dependency not installed")
         reuse_code_base_dir = MagicMock()
         kwargs = {"foo": object(), "bar": object()}
         with (
