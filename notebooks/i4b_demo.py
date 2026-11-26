@@ -17,7 +17,7 @@ def _():
     from i4b.models.model_buildings import Building
     from i4b.models.model_hvac import Heatpump_AW
     from i4b.simulator import Model_simulator
-    from i4b_data.buildings import sfh_1919_1948_0_soc
+    from i4b.data.buildings import sfh_1919_1948_0_soc
 
     # leap-c-lab registered planners
     from leapc_lab import create_planner

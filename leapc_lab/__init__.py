@@ -18,11 +18,11 @@ ENV_REGISTRY: dict[str, tuple[str, str]] = {
     "cartpole_balance": ("leapc_lab.cartpole.env", "CartPoleBalanceEnv"),
     "chain": ("leapc_lab.chain.env", "ChainEnv"),
     # The upstream i4b RoomHeatEnv: flat-array obs (not the i4b planner's dict
-    # contract), data-driven scenarios from i4b_data. Construction requires the
+    # contract), data-driven scenarios from i4b.data. Construction requires the
     # i4b-specific kwargs, e.g.:
     #   create_env("i4b", hp_model="Heatpump_AW", method="4R3C", mdot_HP=0.25,
     #              building="sfh_1919_1948_0_soc", days=1,
-    #              internal_gain_profile="i4b_data/profiles/InternalGains/"
+    #              internal_gain_profile="i4b/data/profiles/InternalGains/"
     #                                    "ResidentialDetached.csv")
     # Weather resolves from the wheel for the standard Freiburg buildings
     # (one-time PVGIS download otherwise), gains profiles are package-relative

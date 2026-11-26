@@ -42,9 +42,9 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 # Build acados first: https://docs.acados.org/
 # acados-template = { path = "/path/to/your/acados/interfaces/acados_template", editable = true }
 
-# i4b is not on PyPI. Pinned to the revision that ships i4b_data (gains profiles,
-# weather) inside the wheel (leap-c/i4b#1).
-i4b = { git = "https://github.com/leap-c/i4b.git", rev = "549c6ba847d2b13d5a66a0f436e4c827b643634f" }
+# i4b is not on PyPI. Pinned to a revision of the leap-c/i4b fork that ships its data
+# as the `i4b.data` package and has the corrected air heat capacity (C_AIR_SPEC).
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "8a15e05c1292af45e333a688d12264c65a7342f5" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"

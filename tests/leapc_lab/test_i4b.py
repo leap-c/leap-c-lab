@@ -4,17 +4,16 @@ import pytest
 
 pytest.importorskip("acados_template", reason="requires a local acados build")
 i4b = pytest.importorskip("i4b", reason="requires the i4b extra")
-pytest.importorskip("i4b_data", reason="requires the i4b extra")
 
 import casadi as ca  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.linalg  # noqa: E402
 import torch  # noqa: E402
+from i4b.data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc  # noqa: E402
+from i4b.data.buildings.sfh_2010_2015 import sfh_2010_2015_2_kfw  # noqa: E402
+from i4b.data.buildings.sfh_2016_now import sfh_2016_now_0_soc  # noqa: E402
 from i4b.models.model_buildings import Building  # noqa: E402
 from i4b.models.model_hvac import Heatpump_AW  # noqa: E402
-from i4b_data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc  # noqa: E402
-from i4b_data.buildings.sfh_2010_2015 import sfh_2010_2015_2_kfw  # noqa: E402
-from i4b_data.buildings.sfh_2016_now import sfh_2016_now_0_soc  # noqa: E402
 
 from leapc_lab.i4b.acados_ocp import (  # noqa: E402
     SUPPORTED_METHODS,
