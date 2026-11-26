@@ -30,7 +30,9 @@ class I4bPlannerConfig:
 
     The objective mixes energy and price costs per stage via
     ``grid_signal = lam * price / pi_ref + (1 - lam)``, and penalizes comfort
-    violations with the quadratic slack weight ``ws``.
+    violations with the quadratic slack weight ``ws``. ``grid_signal`` scales
+    the electrical energy of each stage in the OCP cost, see
+    :func:`~leapc_lab.i4b.acados_ocp.export_parametric_ocp`.
 
     Attributes:
         building_params: Building parameter dict used to construct the Building
@@ -128,11 +130,11 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
 
             hp_model = Heatpump_AW(mdot_HP=self.cfg.mdot_hp)
 
-        ad, bd, ed = calculate_discrete_dynamics(building_model, self.cfg.delta_t)
+        Ad, Bd, Ed = calculate_discrete_dynamics(building_model, self.cfg.delta_t)
         ocp, param_manager, param_space, default_param = export_parametric_ocp(
-            ad=ad,
-            bd=bd,
-            ed=ed,
+            Ad=Ad,
+            Bd=Bd,
+            Ed=Ed,
             mdot_hp=hp_model.mdot_HP,
             n_horizon=self.cfg.n_horizon,
             hp_model=hp_model,
@@ -185,7 +187,7 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             action: Optional warm-start action.
             params: Optional override of the discrete dynamics
                 (see class docstring), batched as
-                ``{"Ad": (B, nx, nx), "Bd": (B, nx, 1), "Ed": (B, nx, 2),
+                ``{"Ad": (B, nx, nx), "Bd": (B, nx, 1), "Ed": (B, nx, nd),
                 "mdot_hp": (B, 1)}``. Defaults (the dynamics of
                 ``cfg.building_params``) are used if None.
             ctx: Optional solver context for warm-starting.

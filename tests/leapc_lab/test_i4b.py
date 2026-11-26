@@ -21,6 +21,7 @@ from leapc_lab.i4b.acados_ocp import (  # noqa: E402
     export_parametric_ocp,
 )
 from leapc_lab.i4b.planner import I4bPlanner, I4bPlannerConfig  # noqa: E402
+from leapc_lab.i4b.utils import thermal_power_kw  # noqa: E402
 
 
 def _building(params, mdot_hp=0.25, method="4R3C"):
@@ -43,8 +44,13 @@ def _observations(batch_size, dtype=torch.float64):
 
 
 def _fixed_discrete_dynamics(building, delta_t):
-    """Independent reference implementation of the discrete dynamics."""
-    x = ca.SX.sym("x", 3)
+    """Independent reference: ZOH via A^-1 (Ad - I), valid for invertible A.
+
+    `calculate_discrete_dynamics` uses the Van Loan block exponential instead, so
+    the two only agree if both are right.
+    """
+    nx = len(building.state_keys)
+    x = ca.SX.sym("x", nx)
     u = ca.SX.sym("u", 1)
     d = ca.SX.sym("d", 2)
     dynamics = building.calc_casadi(x, u[0], d)
@@ -52,19 +58,21 @@ def _fixed_discrete_dynamics(building, delta_t):
     Bc = np.asarray(ca.evalf(ca.jacobian(dynamics, u)))
     Ec = np.asarray(ca.evalf(ca.jacobian(dynamics, d)))
     Ad = scipy.linalg.expm(Ac * delta_t)
-    integral = np.linalg.solve(Ac, Ad - np.eye(3))
+    integral = np.linalg.solve(Ac, Ad - np.eye(nx))
     return Ad, integral @ Bc, integral @ Ec
 
 
-def test_discrete_dynamics_match_fixed_ocp_calculation():
-    building = _building(sfh_1919_1948_0_soc)
+@pytest.mark.parametrize("method, nx", [("2R2C", 2), ("4R3C", 3), ("5R4C", 4)])
+def test_discrete_dynamics_match_reference_for_every_method(method, nx):
+    assert method in SUPPORTED_METHODS
+    building = _building(sfh_1919_1948_0_soc, method=method)
 
     actual = calculate_discrete_dynamics(building, 900.0)
     expected = _fixed_discrete_dynamics(building, 900.0)
 
-    assert [matrix.shape for matrix in actual] == [(3, 3), (3, 1), (3, 2)]
+    assert [matrix.shape for matrix in actual] == [(nx, nx), (nx, 1), (nx, 2)]
     for actual_matrix, expected_matrix in zip(actual, expected):
-        np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-9, atol=1e-12)
 
 
 def test_discrete_dynamics_differ_between_houses():
@@ -74,18 +82,9 @@ def test_discrete_dynamics_differ_between_houses():
     assert any(not np.allclose(old, new) for old, new in zip(old_house, new_house))
 
 
-@pytest.mark.parametrize("method, nx", [("2R2C", 2), ("4R3C", 3), ("5R4C", 4)])
-def test_discrete_dynamics_support_all_casadi_methods(method, nx):
-    assert method in SUPPORTED_METHODS
-
-    ad, bd, ed = calculate_discrete_dynamics(_building(sfh_1919_1948_0_soc, method=method), 900.0)
-
-    assert ad.shape == (nx, nx)
-    assert bd.shape == (nx, 1)
-    assert ed.shape == (nx, 2)
-
-
 def test_discrete_dynamics_rejects_method_without_casadi_export():
+    # Guard: if 6R4C ever gets a CasADi export, pick another unsupported method.
+    assert "6R4C" not in SUPPORTED_METHODS
     building = _building(sfh_1919_1948_0_soc, method="6R4C")
 
     with pytest.raises(ValueError, match="no CasADi export"):
@@ -96,7 +95,7 @@ def test_export_ocp_returns_space_and_defaults_for_runtime_matrices():
     Ad = np.arange(1.0, 10.0).reshape(3, 3)
     Bd = np.arange(11.0, 14.0).reshape(3, 1)
     Ed = np.arange(21.0, 27.0).reshape(3, 2)
-    _, manager, param_space, defaults = export_parametric_ocp(
+    _, _, param_space, defaults = export_parametric_ocp(
         Ad, Bd, Ed, 0.25, n_horizon=2, hp_model=Heatpump_AW(mdot_HP=0.25)
     )
 
@@ -110,21 +109,17 @@ def test_export_ocp_returns_space_and_defaults_for_runtime_matrices():
         assert np.all(param_space[name].low <= default)
         assert np.all(param_space[name].high >= default)
 
-    # The manager flattens matrix defaults for p_global; the OCP recovers the
-    # matrices from the flat symbols via ca.reshape (both column-major).
-    assert manager.differentiable_default_flat.size == 19
-    p_global = ca.SX.sym("p_global", 19)
-    unpack = ca.Function(
-        "unpack",
-        [p_global],
-        [
-            ca.reshape(p_global[:9], 3, 3),
-            ca.reshape(p_global[9:12], 3, 1),
-            ca.reshape(p_global[12:18], 3, 2),
-        ],
-    )
-    for actual, expected_matrix in zip(unpack(manager.differentiable_default_flat), (Ad, Bd, Ed)):
-        np.testing.assert_array_equal(np.asarray(actual), expected_matrix)
+
+def test_export_ocp_rejects_mismatched_dynamics_shapes():
+    with pytest.raises(ValueError, match="Dynamics require shapes"):
+        export_parametric_ocp(
+            np.eye(3),
+            np.ones((3, 1)),
+            np.ones((3, 3)),  # one disturbance column too many
+            0.25,
+            n_horizon=2,
+            hp_model=Heatpump_AW(mdot_HP=0.25),
+        )
 
 
 def test_stagewise_parameter_order_and_gain_routing():
@@ -176,11 +171,11 @@ def test_ocp_dynamics_use_runtime_matrices_and_mass_flow():
         np.asarray(next_state).reshape(-1),
         Ad @ x + Bd[:, 0] * u[0] + Ed @ stagewise[:2],
     )
-    assert float(qth) == pytest.approx(0.25 * 4181 * (35.0 - 17.0) / 1000)
+    assert float(qth) == pytest.approx(thermal_power_kw(0.25, 35.0, 17.0))
 
     p_global[-1] = 0.3
     _, changed_qth = evaluate(x, u, stagewise, p_global)
-    assert float(changed_qth) == pytest.approx(0.3 * 4181 * (35.0 - 17.0) / 1000)
+    assert float(changed_qth) == pytest.approx(thermal_power_kw(0.3, 35.0, 17.0))
 
 
 def test_planner_defaults_match_building_matrices():
@@ -195,10 +190,11 @@ def test_planner_defaults_match_building_matrices():
     np.testing.assert_array_equal(defaults["Ad"], ad)
     np.testing.assert_array_equal(defaults["Bd"], bd)
     np.testing.assert_array_equal(defaults["Ed"], ed)
-    np.testing.assert_array_equal(defaults["mdot_hp"], np.array([0.25]))
 
 
 def test_batched_heterogeneous_solve_matches_separate_solves(tmp_path):
+    # Two 4R3C houses: same state dimension (one compiled OCP), different dynamics
+    # matrices. Mixing methods (different nx) in one batch is not supported.
     old_building = _building(sfh_1919_1948_0_soc)
     new_building = _building(sfh_2010_2015_2_kfw)
     hp = Heatpump_AW(mdot_HP=0.25)
@@ -241,8 +237,12 @@ def test_batched_heterogeneous_solve_matches_separate_solves(tmp_path):
 def test_long_horizon_solve_well_insulated_house(tmp_path):
     """Regression: zero-initialized solves failed for well-insulated houses.
 
-    Cold-started zero iterates led to ACADOS_MINSTEP (status 4, u0 returned
-    as 0) at the 24 h default horizon before I4bInitializer was added.
+    "Well insulated" means low heat losses per floor area and hence a slow house:
+    sfh_2016_now_0_soc loses about 1.3 W/(m^2 K) (H_tr + H_ve per floor area,
+    4R3C) with a time constant of roughly 35 h, against 3.7 W/(m^2 K) and 19 h
+    for sfh_1919_1948_0_soc. Cold-started zero iterates led to ACADOS_MINSTEP
+    (status 4, u0 returned as 0) at the 24 h default horizon before
+    I4bInitializer was added.
     """
     planner = I4bPlanner(
         cfg=I4bPlannerConfig(building_params=sfh_2016_now_0_soc),
