@@ -15,6 +15,7 @@ from leapc_lab.i4b.acados_ocp import (
     SUPPORTED_METHODS,
     I4bInitializer,
     calculate_discrete_dynamics,
+    disturbance_keys,
     export_parametric_ocp,
 )
 from leapc_lab.planner import ParameterizedPlanner
@@ -140,6 +141,7 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             hp_model=hp_model,
             ws=self.cfg.ws,
             delta_t=self.cfg.delta_t,
+            disturbance_keys=disturbance_keys(building_model.method),
         )
         diff_mpc = AcadosDiffMpcTorch(
             ocp=ocp,
@@ -204,9 +206,8 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
         setpoints = obs.get("setpoints", {})
         fc = obs.get("forecast", {})
 
-        channels = {
-            "T_amb": disturbances.get("T_amb"),
-            "Qdot_gains": disturbances.get("Qdot_gains"),
+        channels = {key: disturbances.get(key) for key in disturbance_keys(self.cfg.method)}
+        channels |= {
             "T_set_lower": setpoints.get("T_set_lower"),
             "T_set_upper": setpoints.get("T_set_upper"),
         }

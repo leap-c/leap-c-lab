@@ -20,11 +20,24 @@ from leap_c.parameters import AcadosParameterManager
 
 from leapc_lab.i4b.utils import thermal_power_kw
 
-SUPPORTED_METHODS = ("2R2C", "4R3C", "5R4C")
+SUPPORTED_METHODS = ("2R2C", "4R3C", "5R4C", "7R5C")
 """Building methods the OCP supports (those with a ``calc_*_casadi`` implementation)."""
 
 DISTURBANCE_KEYS = ("T_amb", "Qdot_gains")
-"""Disturbances ``d`` of the supported methods, in the order their CasADi models read them."""
+"""Disturbances ``d`` of the lumped-gain methods (2R2C, 4R3C, 5R4C), in model order."""
+
+_SPLIT_GAIN_KEYS = ("T_amb", "Qdot_gains", "Qdot_int", "Qdot_sol")
+
+
+def disturbance_keys(method: str) -> tuple[str, ...]:
+    """Disturbances ``d`` a building method's CasADi model reads, in its order.
+
+    7R5C distributes internal and solar gains to different nodes, so it reads them
+    split (``Qdot_gains`` is part of its input vector but unused).
+    """
+    if method not in SUPPORTED_METHODS:
+        raise ValueError(f"Building method {method!r} has no CasADi export")
+    return _SPLIT_GAIN_KEYS if method == "7R5C" else DISTURBANCE_KEYS
 
 
 def calculate_discrete_dynamics(
@@ -39,15 +52,14 @@ def calculate_discrete_dynamics(
     Returns:
         ``(Ad, Bd, Ed)`` with shapes (nx, nx), (nx, nu), (nx, nd) such that
         ``x_next = Ad @ x + Bd @ u + Ed @ d``, with ``nu = 1`` (the supply
-        temperature) and ``d`` ordered as :data:`DISTURBANCE_KEYS`.
+        temperature) and ``d`` ordered as :func:`disturbance_keys` of the method.
     """
-    if building_model.method not in SUPPORTED_METHODS:
-        raise ValueError(f"Building method {building_model.method!r} has no CasADi export")
+    keys = disturbance_keys(building_model.method)
 
     nx = len(building_model.state_keys)
     x = ca.SX.sym("x", nx)
     u = ca.SX.sym("u", 1)
-    d = ca.SX.sym("d", len(DISTURBANCE_KEYS))
+    d = ca.SX.sym("d", len(keys))
     f_expl_expr = building_model.calc_casadi(x, u[0], d)
 
     Ac = np.asarray(ca.evalf(ca.jacobian(f_expl_expr, x)))
@@ -90,6 +102,7 @@ def export_parametric_ocp(
     name: str = "i4b",
     ws: float = 1.0,
     delta_t: float = 900.0,
+    disturbance_keys: tuple[str, ...] = DISTURBANCE_KEYS,
 ) -> tuple[AcadosOcp, AcadosParameterManager, gym.spaces.Dict, dict[str, np.ndarray]]:
     """Export the i4b MPC as a parametric acados OCP.
 
@@ -111,13 +124,15 @@ def export_parametric_ocp(
             :func:`calculate_discrete_dynamics`.
         Bd: Discrete-time input matrix, shape (nx, 1).
         Ed: Discrete-time disturbance matrix, shape (nx, nd), columns ordered
-            as :data:`DISTURBANCE_KEYS`.
+            as ``disturbance_keys``.
         mdot_hp: Mass-flow rate of the HP circuit [kg/s].
         n_horizon: Number of shooting intervals.
         hp_model: Instantiated i4b ``Heatpump`` model (used for the COP curve).
         name: Acados model name, also used for the generated C code.
         ws: Quadratic weight on the T_room comfort slacks.
         delta_t: Sampling time [s].
+        disturbance_keys: Names of the columns of ``Ed``, each registered as a
+            stage-wise parameter (see :func:`disturbance_keys`).
 
     Returns:
         ``(ocp, parameter_manager, param_space, default_param)``.
@@ -153,10 +168,10 @@ def export_parametric_ocp(
     mdot_hp_flat = register_runtime_matrix("mdot_hp", np.array([mdot_hp]))
 
     # Non-differentiable stage-wise forecasts
-    disturbance_defaults = {"T_amb": 5.0, "Qdot_gains": 0.0}
+    disturbance_defaults = {"T_amb": 5.0}  # gains default to 0 W
     disturbances = {
-        key: manager.register_parameter(key, default=np.array([disturbance_defaults[key]]))
-        for key in DISTURBANCE_KEYS
+        key: manager.register_parameter(key, default=np.array([disturbance_defaults.get(key, 0.0)]))
+        for key in disturbance_keys
     }
     T_amb = disturbances["T_amb"]
     T_set_lower = manager.register_parameter("T_set_lower", default=np.array([20.0]))

@@ -7,6 +7,7 @@ i4b = pytest.importorskip("i4b", reason="requires the i4b extra")
 
 import casadi as ca  # noqa: E402
 import numpy as np  # noqa: E402
+import scipy.integrate  # noqa: E402
 import scipy.linalg  # noqa: E402
 import torch  # noqa: E402
 from i4b.data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc  # noqa: E402
@@ -18,6 +19,7 @@ from i4b.models.model_hvac import Heatpump_AW  # noqa: E402
 from leapc_lab.i4b.acados_ocp import (  # noqa: E402
     SUPPORTED_METHODS,
     calculate_discrete_dynamics,
+    disturbance_keys,
     export_parametric_ocp,
 )
 from leapc_lab.i4b.planner import I4bPlanner, I4bPlannerConfig  # noqa: E402
@@ -73,6 +75,46 @@ def test_discrete_dynamics_match_reference_for_every_method(method, nx):
     assert [matrix.shape for matrix in actual] == [(nx, nx), (nx, 1), (nx, 2)]
     for actual_matrix, expected_matrix in zip(actual, expected):
         np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-9, atol=1e-12)
+
+
+def test_7r5c_discrete_dynamics_match_integration():
+    # 7R5C has a zero row (T_op), so A is singular and the A^-1 reference above does
+    # not apply; integrate the continuous model over one step instead.
+    building = _building(sfh_2016_now_0_soc, method="7R5C")
+    assert disturbance_keys("7R5C") == ("T_amb", "Qdot_gains", "Qdot_int", "Qdot_sol")
+    Ad, Bd, Ed = calculate_discrete_dynamics(building, 900.0)
+    assert [m.shape for m in (Ad, Bd, Ed)] == [(6, 6), (6, 1), (6, 4)]
+
+    x_sym, u_sym, d_sym = ca.SX.sym("x", 6), ca.SX.sym("u"), ca.SX.sym("d", 4)
+    rhs = ca.Function("rhs", [x_sym, u_sym, d_sym], [building.calc_casadi(x_sym, u_sym, d_sym)])
+    x0 = np.array([20.5, 20.0, 0.0, 19.0, 22.0, 28.0])
+    u, d = 35.0, np.array([3.0, 0.0, 400.0, 1500.0])
+    sol = scipy.integrate.solve_ivp(
+        lambda _t, x: np.asarray(rhs(x, u, d)).reshape(-1),
+        (0.0, 900.0),
+        x0,
+        method="LSODA",
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(Ad @ x0 + Bd[:, 0] * u + Ed @ d, sol.y[:, -1], atol=1e-6)
+
+
+def test_planner_solves_7r5c(tmp_path):
+    planner = I4bPlanner(
+        cfg=I4bPlannerConfig(building_params=sfh_2016_now_0_soc, method="7R5C", n_horizon=8),
+        export_directory=tmp_path,
+    )
+    obs = {
+        "state": [20.5, 20.0, 20.0, 19.5, 21.0, 25.0],
+        "disturbances": {"T_amb": 2.0, "Qdot_gains": 0.0, "Qdot_int": 300.0, "Qdot_sol": 0.0},
+    }
+
+    ctx, u0, x_traj, *_ = planner(obs)
+
+    assert np.all(ctx.status == 0)
+    assert x_traj.shape[-1] == 6
+    assert 5.0 <= float(u0[0, 0]) <= 65.0
 
 
 def test_discrete_dynamics_differ_between_houses():
