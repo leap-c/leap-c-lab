@@ -4,6 +4,7 @@
 /build/
 /dist/
 /*.egg-info/
+/uv.lock
 __pycache__/
 *.py[cod]
 acados_ocp_*/
@@ -15,3 +16,6 @@ output/
 
 # Local uv source override
 uv.lock
+
+# marimo notebook session state
+notebooks/__marimo__/
