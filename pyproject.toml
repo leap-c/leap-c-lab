@@ -43,8 +43,9 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 # acados-template = { path = "/path/to/your/acados/interfaces/acados_template", editable = true }
 
 # i4b is not on PyPI. Pinned to a revision of the leap-c/i4b fork that ships its data
-# as the `i4b.data` package and has the corrected air heat capacity (C_AIR_SPEC).
-i4b = { git = "https://github.com/leap-c/i4b.git", rev = "8a15e05c1292af45e333a688d12264c65a7342f5" }
+# as the `i4b.data` package, with the corrected air heat capacity (C_AIR_SPEC) and
+# RoomHeatEnv resolving its gains profile through the package.
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "ec30efdcc0f5af46ea1205e79e70c575f4f10ba6" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"
