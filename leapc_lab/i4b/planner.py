@@ -52,6 +52,8 @@ class I4bPlannerConfig:
         n_batch_init: Initially supported batch size for the batch OCP solver.
         num_threads_batch_solver: Number of parallel threads for the batch solver.
         dtype: Output tensor dtype. Uses PyTorch default if None.
+        solver_options: acados solver options overriding
+            :func:`~leapc_lab.i4b.acados_ocp.default_solver_options`.
     """
 
     building_params: dict | None = None
@@ -66,6 +68,7 @@ class I4bPlannerConfig:
     n_batch_init: int | None = None
     num_threads_batch_solver: int | None = None
     dtype: torch.dtype | None = None
+    solver_options: dict | None = None
 
     def __post_init__(self) -> None:
         if self.method not in SUPPORTED_METHODS:
@@ -142,6 +145,7 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             ws=self.cfg.ws,
             delta_t=self.cfg.delta_t,
             disturbance_keys=disturbance_keys(building_model.method),
+            solver_options=self.cfg.solver_options,
         )
         diff_mpc = AcadosDiffMpcTorch(
             ocp=ocp,
