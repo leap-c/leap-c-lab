@@ -13,6 +13,7 @@ from leap_c.utils.collate import collate_acados_diff_mpc_ctx
 
 from leapc_lab.i4b.acados_ocp import (
     SUPPORTED_METHODS,
+    ComfortWeights,
     I4bInitializer,
     calculate_discrete_dynamics,
     disturbance_keys,
@@ -54,6 +55,10 @@ class I4bPlannerConfig:
         dtype: Output tensor dtype. Uses PyTorch default if None.
         solver_options: acados solver options overriding
             :func:`~leapc_lab.i4b.acados_ocp.default_solver_options`.
+        comfort: Comfort penalties (``ws * s^2`` on both bounds if None).
+        T_hp_min: Lower bound on the supply temperature [degC].
+        T_hp_max: Upper bound on the supply temperature [degC].
+        Qth_max: Upper bound on the thermal power [kW].
     """
 
     building_params: dict | None = None
@@ -69,6 +74,10 @@ class I4bPlannerConfig:
     num_threads_batch_solver: int | None = None
     dtype: torch.dtype | None = None
     solver_options: dict | None = None
+    comfort: ComfortWeights | None = None
+    T_hp_min: float = 5.0
+    T_hp_max: float = 65.0
+    Qth_max: float = 26.0
 
     def __post_init__(self) -> None:
         if self.method not in SUPPORTED_METHODS:
@@ -146,6 +155,10 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             delta_t=self.cfg.delta_t,
             disturbance_keys=disturbance_keys(building_model.method),
             solver_options=self.cfg.solver_options,
+            comfort=self.cfg.comfort,
+            T_hp_min=self.cfg.T_hp_min,
+            T_hp_max=self.cfg.T_hp_max,
+            Qth_max=self.cfg.Qth_max,
         )
         diff_mpc = AcadosDiffMpcTorch(
             ocp=ocp,
@@ -186,6 +199,8 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
                                     for any of the keys above, plus "price".
                                     Short forecasts are padded with their last
                                     value, long ones cut.
+                    "comfort":      {"lower": ..., "upper": ...} scales of
+                                    cfg.comfort, default 1; scalar, (B, 1) or (B, N_fc)
 
                 Without a "price" forecast the objective is energy-only
                 (``grid_signal == 1``), see :class:`I4bPlannerConfig` for the
@@ -225,6 +240,18 @@ class I4bPlanner(ParameterizedPlanner[AcadosDiffMpcCtx]):
             staged = _forecast_to_stagewise(fc.get(name), current_arr, n_horizon)
             if staged is not None:
                 params_dict[name] = staged
+
+        # comfort scales: (B, 1) for the whole horizon, (B, N) per stage
+        for key, value in obs.get("comfort", {}).items():
+            if key not in ("lower", "upper"):
+                raise KeyError(f"comfort scales are 'lower' and 'upper', got {key!r}")
+            arr = _to_2d(value).detach().cpu().numpy()
+            if arr.shape[0] != batch_size:
+                arr = np.broadcast_to(arr, (batch_size, arr.shape[1]))
+            per_stage = arr.shape[1] > 1
+            params_dict[f"comfort_{key}"] = _forecast_to_stagewise(
+                arr if per_stage else None, None if per_stage else arr, n_horizon
+            )
 
         # TODO: no env provides a "price" forecast yet; the price path is only
         # active when a forecast is passed explicitly.

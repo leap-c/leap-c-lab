@@ -6,6 +6,7 @@ the leap-c fork of https://github.com/lfrison/i4b).
 
 from collections import OrderedDict
 from copy import deepcopy
+from dataclasses import dataclass
 
 import casadi as ca
 import gymnasium as gym
@@ -30,11 +31,7 @@ _SPLIT_GAIN_KEYS = ("T_amb", "Qdot_gains", "Qdot_int", "Qdot_sol")
 
 
 def disturbance_keys(method: str) -> tuple[str, ...]:
-    """Disturbances ``d`` a building method's CasADi model reads, in its order.
-
-    7R5C distributes internal and solar gains to different nodes, so it reads them
-    split (``Qdot_gains`` is part of its input vector but unused).
-    """
+    """Disturbances ``d`` of a method's CasADi model, in order (7R5C splits the gains)."""
     if method not in SUPPORTED_METHODS:
         raise ValueError(f"Building method {method!r} has no CasADi export")
     return _SPLIT_GAIN_KEYS if method == "7R5C" else DISTURBANCE_KEYS
@@ -77,14 +74,9 @@ def calculate_discrete_dynamics(
 
 
 def default_solver_options(n_horizon: int) -> dict:
-    """Moderately fast, still reliable acados settings for the i4b OCP.
+    """Mildly faster defaults: looser stationarity only (1e-4), SQP capped at 50.
 
-    Only stationarity is loosened (1e-4 instead of 1e-6): the plans keep satisfying
-    the dynamics, the bounds and complementarity to 1e-6. In a 48-step closed loop
-    this was ~1.4x faster with identical supply temperatures. The SQP iteration
-    cap (50 instead of 100) stops rare stalls. Partial condensing over fewer blocks
-    (``qp_solver_cond_N = N/8``) made every solve fail here, so it is left at its
-    default. Pass ``{"nlp_solver_type": "SQP_RTI"}`` for one QP per call.
+    ``qp_solver_cond_N = N/8`` made every solve fail, so it stays at its default.
     """
     del n_horizon  # kept for horizon-dependent options
     return {"nlp_solver_tol_stat": 1e-4, "nlp_solver_max_iter": 50}
@@ -106,6 +98,41 @@ def _cop_casadi(hp_model: Heatpump, T_HP: ca.SX, T_amb: ca.SX) -> ca.SX:
         raise TypeError(f"Unsupported HP model type: {type(hp_model).__name__}")
 
 
+@dataclass(frozen=True)
+class ComfortWeights:
+    """L1/L2 penalties per K of comfort violation and stage (``l1 * s + l2 * s^2``).
+
+    Defaults equal ``ws * s^2`` (``ws = 1``). Scaled at runtime by ``obs["comfort"]``.
+    """
+
+    lower_l1: float = 0.0
+    lower_l2: float = 1.0
+    upper_l1: float = 0.0
+    upper_l2: float = 1.0
+
+    @classmethod
+    def from_ws(cls, ws: float) -> "ComfortWeights":
+        """The quadratic penalty ``ws * s^2`` on both bounds."""
+        return cls(lower_l1=0.0, lower_l2=ws, upper_l1=0.0, upper_l2=ws)
+
+    @classmethod
+    def heating_only(
+        cls, lower_l1: float, lower_l2: float = 0.0, ratio: float = 10.0
+    ) -> "ComfortWeights":
+        """Exact L1 penalty below the band, a ``ratio`` times weaker L1-only one above.
+
+        A strong or quadratic upper penalty makes a heat-only MPC under-heat to
+        soften unavoidable solar overheating.
+        """
+        return cls(lower_l1=lower_l1, lower_l2=lower_l2, upper_l1=lower_l1 / ratio, upper_l2=0.0)
+
+    def slack_costs(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(z, Z)`` for the rows ``[lower, upper]``, acados convention ``z s + Z s^2 / 2``."""
+        z = np.array([self.lower_l1, self.upper_l1], dtype=float)
+        Z = 2.0 * np.array([self.lower_l2, self.upper_l2], dtype=float)
+        return z, Z
+
+
 def export_parametric_ocp(
     Ad: np.ndarray,
     Bd: np.ndarray,
@@ -118,6 +145,10 @@ def export_parametric_ocp(
     delta_t: float = 900.0,
     disturbance_keys: tuple[str, ...] = DISTURBANCE_KEYS,
     solver_options: dict | None = None,
+    comfort: ComfortWeights | None = None,
+    T_hp_min: float = 5.0,
+    T_hp_max: float = 65.0,
+    Qth_max: float = 26.0,
 ) -> tuple[AcadosOcp, AcadosParameterManager, gym.spaces.Dict, dict[str, np.ndarray]]:
     """Export the i4b MPC as a parametric acados OCP.
 
@@ -131,8 +162,9 @@ def export_parametric_ocp(
     ``Qth`` from :func:`~leapc_lab.i4b.utils.thermal_power_kw` [kW]. The planner
     sets ``grid_signal`` (1 = energy only, see
     :class:`~leapc_lab.i4b.planner.I4bPlannerConfig`). Comfort band on
-    ``T_room`` via slack-weighted nonlinear constraints (quadratic weight
-    ``ws``), hard limits on ``Qth`` (26 kW) and ``T_HP`` (5-65 degC).
+    ``T_room`` via slack-weighted nonlinear constraints (``comfort``, by
+    default the quadratic weight ``ws``), hard limits ``0 <= Qth <= Qth_max``
+    and ``T_hp_min <= T_HP <= T_hp_max``.
 
     Args:
         Ad: Discrete-time state matrix, shape (nx, nx), from
@@ -144,12 +176,17 @@ def export_parametric_ocp(
         n_horizon: Number of shooting intervals.
         hp_model: Instantiated i4b ``Heatpump`` model (used for the COP curve).
         name: Acados model name, also used for the generated C code.
-        ws: Quadratic weight on the T_room comfort slacks.
+        ws: Quadratic weight on the T_room comfort slacks; ignored if
+            ``comfort`` is given.
         delta_t: Sampling time [s].
         disturbance_keys: Names of the columns of ``Ed``, each registered as a
             stage-wise parameter (see :func:`disturbance_keys`).
         solver_options: acados ``solver_options`` overriding
             :func:`default_solver_options`, e.g. ``{"nlp_solver_type": "SQP_RTI"}``.
+        comfort: Comfort penalties; ``ComfortWeights.from_ws(ws)`` if None.
+        T_hp_min: Lower bound on the supply temperature [degC].
+        T_hp_max: Upper bound on the supply temperature [degC].
+        Qth_max: Upper bound on the thermal power [kW].
 
     Returns:
         ``(ocp, parameter_manager, param_space, default_param)``.
@@ -194,6 +231,9 @@ def export_parametric_ocp(
     T_set_lower = manager.register_parameter("T_set_lower", default=np.array([20.0]))
     T_set_upper = manager.register_parameter("T_set_upper", default=np.array([26.0]))
     grid_signal = manager.register_parameter("grid_signal", default=np.array([1.0]))
+    # comfort penalty scales, see the constraints
+    comfort_lower = manager.register_parameter("comfort_lower", default=np.array([1.0]))
+    comfort_upper = manager.register_parameter("comfort_upper", default=np.array([1.0]))
 
     ######## Model ########
     ocp.model.name = name
@@ -233,11 +273,16 @@ def export_parametric_ocp(
 
     ######## Constraints ########
     # h[0]: soft T_room >= T_set_lower, h[1]: soft T_room <= T_set_upper,
-    # h[2]: hard 0 <= Qth <= 26 kW
-    h_expr = ca.vertcat(T_room - T_set_lower, T_set_upper - T_room, Qth)
+    # h[2]: hard 0 <= Qth <= Qth_max
+    # Trick: slack weights are fixed after compilation, so the comfort rows are
+    # scaled by parameters instead (L1 cost scales linearly, L2 quadratically).
+    # Explicit slack controls with parametric cost would be the cleaner option.
+    h_expr = ca.vertcat(
+        comfort_lower * (T_room - T_set_lower), comfort_upper * (T_set_upper - T_room), Qth
+    )
     ocp.model.con_h_expr = h_expr
     ocp.constraints.lh = np.array([0.0, 0.0, 0.0])
-    ocp.constraints.uh = np.array([ACADOS_INFTY, ACADOS_INFTY, 26.0])
+    ocp.constraints.uh = np.array([ACADOS_INFTY, ACADOS_INFTY, Qth_max])
 
     # Stage 0 gets no con_h constraints implicitly (acados requires an explicit
     # con_h_expr_0); without this, the Qth power cap only holds from stage 1.
@@ -252,19 +297,14 @@ def export_parametric_ocp(
 
     ocp.constraints.idxsh = np.array([0, 1])
     ocp.constraints.idxsh_e = np.array([0, 1])
-    # acados treats Z as the Hessian of the slack cost (0.5 * Z * s^2);
-    # 2 * ws reproduces the ws * s^2 of the original i4b formulation.
-    ocp.cost.zl = np.zeros(2)
-    ocp.cost.zu = np.zeros(2)
-    ocp.cost.Zl = 2.0 * ws * np.ones(2)
-    ocp.cost.Zu = 2.0 * ws * np.ones(2)
-    ocp.cost.zl_e = np.zeros(2)
-    ocp.cost.zu_e = np.zeros(2)
-    ocp.cost.Zl_e = 2.0 * ws * np.ones(2)
-    ocp.cost.Zu_e = 2.0 * ws * np.ones(2)
+    # both rows are violated on their lower side; stage 0 reuses these weights
+    z, Z = (comfort or ComfortWeights.from_ws(ws)).slack_costs()
+    for suffix in ("", "_e"):
+        for name, value in (("zl", z), ("zu", z), ("Zl", Z), ("Zu", Z)):
+            setattr(ocp.cost, name + suffix, value.copy())
 
-    ocp.constraints.lbu = np.array([5.0])
-    ocp.constraints.ubu = np.array([65.0])
+    ocp.constraints.lbu = np.array([T_hp_min])
+    ocp.constraints.ubu = np.array([T_hp_max])
     ocp.constraints.idxbu = np.array([0])
 
     ocp.constraints.x0 = 20.0 * np.ones(nx)

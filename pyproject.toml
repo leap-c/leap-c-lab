@@ -45,7 +45,7 @@ leap-c = { git = "https://github.com/leap-c/leap-c.git", branch = "main" }
 # i4b is not on PyPI. Pinned to a revision of the leap-c/i4b fork that ships its data
 # as the `i4b.data` package, with the corrected air heat capacity (C_AIR_SPEC) and
 # RoomHeatEnv resolving its gains profile through the package.
-i4b = { git = "https://github.com/leap-c/i4b.git", rev = "847710822848fb6801732853838e1ec57aca4bcf" }
+i4b = { git = "https://github.com/leap-c/i4b.git", rev = "f495ca37f1827b399fdcdff5dab584b15e770fc0" }
 
 [tool.pytest.ini_options]
 testpaths = "tests"

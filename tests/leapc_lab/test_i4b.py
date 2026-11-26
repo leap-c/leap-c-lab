@@ -10,6 +10,7 @@ import numpy as np  # noqa: E402
 import scipy.integrate  # noqa: E402
 import scipy.linalg  # noqa: E402
 import torch  # noqa: E402
+from acados_template import ACADOS_INFTY  # noqa: E402
 from i4b.data.buildings.sfh_1919_1948 import sfh_1919_1948_0_soc  # noqa: E402
 from i4b.data.buildings.sfh_2010_2015 import sfh_2010_2015_2_kfw  # noqa: E402
 from i4b.data.buildings.sfh_2016_now import sfh_2016_now_0_soc  # noqa: E402
@@ -18,6 +19,7 @@ from i4b.models.model_hvac import Heatpump_AW  # noqa: E402
 
 from leapc_lab.i4b.acados_ocp import (  # noqa: E402
     SUPPORTED_METHODS,
+    ComfortWeights,
     calculate_discrete_dynamics,
     disturbance_keys,
     export_parametric_ocp,
@@ -180,14 +182,18 @@ def test_stagewise_parameter_order_and_gain_routing():
         T_set_lower=np.full((2, 3, 1), 19.0),
         T_set_upper=np.full((2, 3, 1), 25.0),
         grid_signal=np.full((2, 3, 1), 1.5),
+        comfort_lower=np.full((2, 3, 1), 7.0),
+        comfort_upper=np.full((2, 3, 1), 0.7),
     )
 
-    assert values.shape == (2, 3, 5)
+    assert values.shape == (2, 3, 7)
     np.testing.assert_array_equal(values[..., 0], 4.0)
     np.testing.assert_array_equal(values[..., 1], np.arange(6.0).reshape(2, 3))
     np.testing.assert_array_equal(values[..., 2], 19.0)
     np.testing.assert_array_equal(values[..., 3], 25.0)
     np.testing.assert_array_equal(values[..., 4], 1.5)
+    np.testing.assert_array_equal(values[..., 5], 7.0)
+    np.testing.assert_array_equal(values[..., 6], 0.7)
 
 
 def test_ocp_dynamics_use_runtime_matrices_and_mass_flow():
@@ -205,7 +211,7 @@ def test_ocp_dynamics_use_runtime_matrices_and_mass_flow():
 
     x = np.array([18.0, 19.0, 17.0])
     u = np.array([35.0])
-    stagewise = np.array([5.0, 300.0, 20.0, 26.0, 1.0])
+    stagewise = np.array([5.0, 300.0, 20.0, 26.0, 1.0, 1.0, 1.0])
     p_global = manager.differentiable_default_flat
     next_state, qth = evaluate(x, u, stagewise, p_global)
 
@@ -316,3 +322,68 @@ def test_forward_accepts_plain_inputs_and_uses_ocp_defaults(tmp_path):
     assert np.all(plain[0].status == 0)
     for output_index in range(1, 5):
         torch.testing.assert_close(plain[output_index], batched[output_index], rtol=1e-5, atol=1e-6)
+
+
+def test_comfort_weights_map_to_acados_slack_costs():
+    w = ComfortWeights.heating_only(lower_l1=10.0, lower_l2=2.0, ratio=10.0)
+    assert (w.upper_l1, w.upper_l2) == (1.0, 0.0)
+    z, Z = w.slack_costs()
+    np.testing.assert_array_equal(z, [10.0, 1.0])
+    np.testing.assert_array_equal(Z, [4.0, 0.0])  # acados: 0.5 * Z * s^2 = l2 * s^2
+
+
+def test_export_defaults_keep_the_ws_penalty_and_limits():
+    hp = Heatpump_AW(mdot_HP=0.25)
+    ocp, *_ = export_parametric_ocp(
+        np.eye(3), np.ones((3, 1)), np.ones((3, 2)), 0.25, 2, hp, ws=3.0
+    )
+    np.testing.assert_array_equal(ocp.cost.zl, [0.0, 0.0])
+    np.testing.assert_array_equal(ocp.cost.Zl, [6.0, 6.0])
+    np.testing.assert_array_equal(ocp.constraints.ubu, [65.0])
+    np.testing.assert_array_equal(ocp.constraints.uh, [ACADOS_INFTY, ACADOS_INFTY, 26.0])
+
+    ocp, *_ = export_parametric_ocp(
+        np.eye(3),
+        np.ones((3, 1)),
+        np.ones((3, 2)),
+        0.25,
+        2,
+        hp,
+        comfort=ComfortWeights.heating_only(5.0),
+        T_hp_min=20.0,
+        T_hp_max=55.0,
+        Qth_max=12.0,
+    )
+    np.testing.assert_array_equal(ocp.cost.zl_e, [5.0, 0.5])
+    np.testing.assert_array_equal(ocp.constraints.lbu, [20.0])
+    np.testing.assert_array_equal(ocp.constraints.ubu, [55.0])
+    np.testing.assert_array_equal(ocp.constraints.uh, [ACADOS_INFTY, ACADOS_INFTY, 12.0])
+
+
+def test_comfort_scales_per_batch_element_in_forward(tmp_path):
+    """A house that is too cold heats only if missing the band costs enough."""
+    planner = I4bPlanner(
+        cfg=I4bPlannerConfig(
+            building_params=sfh_1919_1948_0_soc,
+            n_horizon=8,
+            n_batch_init=2,
+            comfort=ComfortWeights.heating_only(lower_l1=1.0, lower_l2=1.0),
+        ),
+        export_directory=tmp_path,
+    )
+    obs = {
+        "state": np.full((2, 3), 18.0),  # 2 K below the 20 degC band
+        "disturbances": {"T_amb": np.full((2, 1), 0.0), "Qdot_gains": np.zeros((2, 1))},
+        "comfort": {"lower": np.array([[10.0], [1e-3]])},  # per batch element
+    }
+
+    ctx, u0, x_traj, *_ = planner(obs)
+
+    assert np.all(ctx.status == 0)
+    assert float(u0[0, 0]) > float(u0[1, 0]) + 5.0  # heats hard vs. barely
+    assert float(x_traj[0, -1, 0]) > float(x_traj[1, -1, 0])
+
+    # Without "comfort" the export-time weights hold (scale 1) for every element.
+    plain = {k: v for k, v in obs.items() if k != "comfort"}
+    _, u0_plain, *_ = planner(plain)
+    torch.testing.assert_close(u0_plain[0], u0_plain[1])
